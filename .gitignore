@@ -1,3 +1,6 @@
-/Windows Version/
-/Android Version/*
-!/Android Version/AndroidApp/
+.gradle/
+.idea/
+build/
+app/build/
+local.properties
+*.iml
