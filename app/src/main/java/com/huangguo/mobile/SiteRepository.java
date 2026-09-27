@@ -13,6 +13,7 @@ import org.jsoup.parser.Parser;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -62,6 +63,8 @@ final class SiteRepository {
                 while ((count = stream.read(buffer)) != -1) bytes.write(buffer, 0, count);
                 return bytes.toByteArray();
             }
+        } catch (IOException error) {
+            throw new IOException("站点连接失败", error);
         } finally {
             connection.disconnect();
         }
