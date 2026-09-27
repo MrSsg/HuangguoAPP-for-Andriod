@@ -674,6 +674,16 @@ function renderSkeleton() {
   content.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
 }
 function renderError(error, retry) {
+  if (/failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|网络|连接失败|无法连接/i.test(error?.message || '')) {
+    content.innerHTML = `<div class="error-state error-state--network" role="alert">
+      <div class="error-main">
+        <svg class="error-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="m12 24 6-5 6 5 6-5 6 5"/></svg>
+        <h1>网络走丢了</h1>
+      </div>
+      <div class="error-footer"><p>请尝试使用代理网络，或联系开发者。</p><button type="button" data-retry="${esc(retry)}">重新尝试</button></div>
+    </div>`;
+    return;
+  }
   content.innerHTML = `<div class="error-state">${esc(error.message || '加载失败，请稍后重试')}<button type="button" data-retry="${esc(retry)}">重试</button></div>`;
 }
 
