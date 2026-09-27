@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="color-scheme" content="light dark">
+  <title>黄果短剧</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-top">
+      <button id="account-avatar" class="account-avatar" type="button" aria-label="登录账号">
+        <img class="account-avatar-default" src="user.svg" alt="">
+        <img id="account-avatar-image" alt="" hidden>
+      </button>
+      <form id="search-form" role="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>
+        <input id="search-input" type="search" placeholder="搜索剧名或 #标签" autocomplete="off" aria-label="搜索剧名或标签">
+      </form>
+      <button id="header-settings" type="button" aria-label="设置" hidden><img src="settings.svg" alt=""></button>
+    </header>
+    <main id="scroll"><div id="content"></div></main>
+    <div id="compact-category" aria-hidden="true"></div>
+    <nav id="dock" aria-label="主导航">
+      <button type="button" data-nav="home" class="active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg></span><span>首页</span></button>
+      <button type="button" data-nav="adult"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 10h18M8 5l3 5m3-5 3 5"/></svg></span><span>剧场</span></button>
+      <button type="button" data-nav="ai"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8zM19 17l.6 1.4L21 19l-1.4.6L19 21l-.6-1.4L17 19l1.4-.6z"/></svg></span><span>AI</span></button>
+      <button type="button" data-nav="library"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 21c.5-4.3 3-6.5 7.5-6.5s7 2.2 7.5 6.5"/></svg></span><span>我的</span></button>
+    </nav>
+    <div id="toast-host" role="status" aria-live="polite"></div>
+    <div id="auth-overlay" hidden>
+      <section class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+        <button id="auth-close" class="auth-close" type="button" aria-label="关闭">×</button>
+        <h2 id="auth-title">登录黄果账号</h2>
+        <p>登录后同步收藏和观看历史</p>
+        <div class="auth-tabs" role="tablist"><button type="button" data-auth-mode="login" class="selected">登录</button><button type="button" data-auth-mode="register">注册</button></div>
+        <form id="auth-form">
+          <label for="auth-username">账号</label><input id="auth-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" minlength="3" maxlength="24" required placeholder="字母、数字或下划线">
+          <label for="auth-password">密码</label><input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="8" required placeholder="至少 8 位">
+          <p id="auth-error" class="auth-error" role="alert" hidden></p>
+          <button id="auth-submit" class="auth-submit" type="submit">登录</button>
+        </form>
+        <p class="auth-footnote">忘记密码请联系管理员重置。</p>
+      </section>
+    </div>
+    <div id="confirm-overlay" hidden>
+      <section class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-message"></p>
+        <div class="confirm-buttons"><button id="confirm-cancel" type="button">取消</button><button id="confirm-accept" type="button">清空</button></div>
+      </section>
+    </div>
+    <div id="update-overlay" hidden>
+      <section class="update-panel" role="dialog" aria-modal="true" aria-labelledby="update-title">
+        <h2 id="update-title">发现新版本</h2>
+        <p id="update-version"></p>
+        <div id="update-notes" hidden></div>
+        <div id="update-progress" hidden><div class="update-progress-label"><span>正在下载安装包</span><strong id="update-percent">0%</strong></div><div class="update-track"><i id="update-fill"></i></div></div>
+        <div class="update-buttons"><button id="update-later" type="button">稍后再说</button><button id="update-download" type="button">下载并安装</button></div>
+      </section>
+    </div>
+  </div>
+  <div id="age-gate" hidden>
+    <div class="age-panel" role="dialog" aria-modal="true" aria-labelledby="age-title">
+      <div class="age-symbol">18+</div>
+      <h1 id="age-title">请确认你的年龄</h1>
+      <p>本应用展示成人内容，仅供已达到所在地法定年龄的用户使用。</p>
+      <button id="age-confirm" type="button">我已年满 18 周岁</button>
+      <button id="age-exit" type="button">退出应用</button>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

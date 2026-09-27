@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="currentColor" role="img" aria-labelledby="title">
+  <title id="title">用户</title>
+  <circle cx="512" cy="332" r="156"/>
+  <path d="M512 552c-183 0-318 112-318 263v13c0 30 24 54 54 54h528c30 0 54-24 54-54v-13c0-151-135-263-318-263z"/>
+</svg>

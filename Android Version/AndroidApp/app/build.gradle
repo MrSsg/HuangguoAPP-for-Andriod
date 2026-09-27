@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.huangguo.mobile'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'com.huangguo.mobile'
+        minSdk 26
+        targetSdk 36
+        versionCode 18
+        versionName '0.1.17'
+    }
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.7.0'
+    implementation 'com.github.parse-community.Parse-SDK-Android:parse:4.4.0'
+    implementation 'org.jsoup:jsoup:1.23.2'
+    implementation 'androidx.media3:media3-exoplayer:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.11.1'
+    implementation 'androidx.media3:media3-ui:1.11.1'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.0.1'
+}

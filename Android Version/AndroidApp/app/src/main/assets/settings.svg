@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="currentColor" role="img" aria-labelledby="title">
+  <title id="title">设置</title>
+  <mask id="center-hole" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+    <rect width="1024" height="1024" fill="#fff"/>
+    <circle cx="512" cy="512" r="128" fill="#000"/>
+  </mask>
+  <g mask="url(#center-hole)">
+    <circle cx="512" cy="512" r="302"/>
+    <rect x="442" y="105" width="140" height="245" rx="38"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(45 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(90 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(135 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(180 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(225 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(270 512 512)"/>
+    <rect x="442" y="105" width="140" height="245" rx="38" transform="rotate(315 512 512)"/>
+  </g>
+</svg>
