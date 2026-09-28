@@ -352,7 +352,12 @@ public final class MainActivity extends Activity {
                     else if (result instanceof Boolean || result instanceof Number) data = result.toString();
                     else data = JSONObject.quote(String.valueOf(result));
                     String script = "window.NativeCallbacks.resolve(" + JSONObject.quote(requestId) + "," + data + ")";
-                    runOnUiThread(() -> webView.evaluateJavascript(script, null));
+                    String authUserId = ("login".equals(action) || "register".equals(action)) && result instanceof JSONObject
+                            ? ((JSONObject) result).optString("userId") : "";
+                    runOnUiThread(() -> {
+                        webView.evaluateJavascript(script, null);
+                        if (!authUserId.isEmpty()) refreshAccountAfterAuth(authUserId);
+                    });
                 } catch (Exception error) {
                     Log.e(TAG, action + " failed", error);
                     String script = "window.NativeCallbacks.reject(" + JSONObject.quote(requestId) + "," + JSONObject.quote(error.getMessage() == null ? "请求失败" : error.getMessage()) + ")";
@@ -360,5 +365,20 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private void refreshAccountAfterAuth(String userId) {
+        requests.execute(() -> {
+            try {
+                account.sync();
+                runOnUiThread(() -> webView.evaluateJavascript("window.hgCloudSynced && window.hgCloudSynced()", null));
+            } catch (Exception error) { Log.w(TAG, "登录后片单稍后同步", error); }
+            try {
+                JSONObject refreshed = account.profile();
+                if (!userId.equals(refreshed.optString("userId"))) return;
+                String script = "window.hgAccountRefreshed && window.hgAccountRefreshed(" + refreshed + ")";
+                runOnUiThread(() -> webView.evaluateJavascript(script, null));
+            } catch (Exception error) { Log.w(TAG, "登录后账号资料稍后刷新", error); }
+        });
     }
 }

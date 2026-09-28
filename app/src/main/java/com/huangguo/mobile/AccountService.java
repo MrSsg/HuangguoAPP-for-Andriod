@@ -38,12 +38,16 @@ final class AccountService {
     }
 
     synchronized JSONObject profile() throws Exception {
+        return profile(true);
+    }
+
+    private JSONObject profile(boolean refreshRemote) throws Exception {
         ParseUser user = ParseUser.getCurrentUser();
         if (user == null) {
             store.activateUser("");
             return new JSONObject().put("loggedIn", false);
         }
-        if (System.currentTimeMillis() - lastProfileRefresh > 5 * 60_000) try {
+        if (refreshRemote && System.currentTimeMillis() - lastProfileRefresh > 5 * 60_000) try {
             user.fetch();
             lastProfileRefresh = System.currentTimeMillis();
         } catch (Exception ignored) { /* 离线时使用本地账号资料 */ }
@@ -55,7 +59,7 @@ final class AccountService {
         ParseFile remote = user.getParseFile("avatar");
         if (remote != null) {
             String remoteName = remote.getName();
-            if (!avatar.isFile() || !remoteName.equals(markers.getString(user.getObjectId(), ""))) try {
+            if (refreshRemote && (!avatar.isFile() || !remoteName.equals(markers.getString(user.getObjectId(), "")))) try {
                 byte[] data = remote.getData();
                 avatar.getParentFile().mkdirs();
                 try (FileOutputStream output = new FileOutputStream(avatar)) { output.write(data); }
@@ -80,8 +84,7 @@ final class AccountService {
             throw error;
         }
         store.activateUser(user.getObjectId());
-        try { sync(); } catch (Exception ignored) { /* 本地记录保留，恢复联网后再同步 */ }
-        return profile();
+        return profile(false);
     }
 
     synchronized JSONObject login(String username, String password) throws Exception {
@@ -94,8 +97,7 @@ final class AccountService {
             throw error;
         }
         store.activateUser(user.getObjectId());
-        try { sync(); } catch (Exception ignored) { /* 登录有效，稍后补同步 */ }
-        return profile();
+        return profile(false);
     }
 
     synchronized JSONObject changePassword(String oldPassword, String newPassword) throws Exception {

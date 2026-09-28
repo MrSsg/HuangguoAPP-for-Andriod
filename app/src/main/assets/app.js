@@ -112,11 +112,21 @@ function setAccount(profile) {
 api('account').then(setAccount).catch(() => {});
 
 let authMode = 'login';
+let authPending = false;
+function setAuthPending(pending, mode = authMode) {
+  const submit = document.getElementById('auth-submit');
+  submit.disabled = pending;
+  submit.classList.toggle('is-loading', pending);
+  submit.setAttribute('aria-busy', String(pending));
+  submit.textContent = pending ? (mode === 'login' ? '正在登录…' : '正在注册…') : (mode === 'login' ? '登录' : '注册并登录');
+  document.querySelectorAll('[data-auth-mode]').forEach(button => { button.disabled = pending; });
+}
 function showAuth(mode = 'login') {
+  if (authPending) mode = authMode;
   authMode = mode;
   authOverlay.hidden = false;
   document.getElementById('auth-title').textContent = mode === 'login' ? '登录黄果账号' : '注册黄果账号';
-  document.getElementById('auth-submit').textContent = mode === 'login' ? '登录' : '注册并登录';
+  setAuthPending(authPending, mode);
   document.getElementById('auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
   document.querySelectorAll('[data-auth-mode]').forEach(button => button.classList.toggle('selected', button.dataset.authMode === mode));
   document.getElementById('auth-error').hidden = true;
@@ -134,23 +144,28 @@ document.getElementById('auth-close').addEventListener('click', hideAuth);
 document.querySelectorAll('[data-auth-mode]').forEach(button => button.addEventListener('click', () => showAuth(button.dataset.authMode)));
 document.getElementById('auth-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (authPending) return;
+  const mode = authMode;
   const username = document.getElementById('auth-username').value.trim();
   const password = document.getElementById('auth-password').value;
-  const submit = document.getElementById('auth-submit');
   const error = document.getElementById('auth-error');
-  submit.disabled = true;
+  authPending = true;
+  setAuthPending(true, mode);
   error.hidden = true;
   try {
-    const profile = await api(authMode, { username, password });
+    const profile = await api(mode, { username, password });
     hideAuth();
     setAccount(profile);
     if (state.route === 'library') goLibrary(state.libraryTab);
-    toast(authMode === 'login' ? '登录成功，片单正在同步' : '注册成功，片单正在同步');
+    toast(mode === 'login' ? '登录成功，片单正在同步' : '注册成功，片单正在同步');
   } catch (failure) {
-    error.textContent = failure.message || '请稍后重试';
-    error.hidden = false;
-  } finally { submit.disabled = false; }
+    if (authOverlay.hidden) toast(failure.message || '请稍后重试', true);
+    else { error.textContent = failure.message || '请稍后重试'; error.hidden = false; }
+  } finally { authPending = false; setAuthPending(false, mode); }
 });
+window.hgAccountRefreshed = profile => {
+  if (profile?.userId && state.account.userId === profile.userId) setAccount(profile);
+};
 window.hgAvatarUpdated = profile => { setAccount(profile); toast('头像已更新'); };
 window.hgAvatarError = message => toast(message || '头像保存失败', true);
 window.hgCloudSynced = () => { if (state.route === 'library') api('library').then(data => { state.library = data; renderLibrary(); }).catch(() => {}); };
@@ -597,7 +612,7 @@ function renderAccountManagement() {
           <label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="8" required>
           <p id="password-error" class="auth-error" role="alert" hidden></p><button type="submit">确认修改</button>
         </form></section>
-      <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1">退出登录</button></section>` : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`}</div>`;
+      <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>` : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`}</div>`;
 }
 
 function renderSearch() {
@@ -1264,8 +1279,27 @@ document.addEventListener('click', async event => {
     return;
   }
   if (event.target.closest('[data-logout]')) {
-    try { setAccount(await api('logout')); state.library = await api('library'); renderSettings(); toast('已退出登录'); }
+    const button = event.target.closest('[data-logout]');
+    if (button.disabled) return;
+    button.disabled = true;
+    button.classList.add('is-loading');
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = '正在退出…';
+    try {
+      setAccount(await api('logout'));
+      state.library = await api('library');
+      setRoute('settings'); renderSettings();
+      toast('已退出登录');
+    }
     catch (error) { toast(error.message, true); }
+    finally {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.classList.remove('is-loading');
+        button.removeAttribute('aria-busy');
+        button.textContent = '退出登录';
+      }
+    }
     return;
   }
   const nav = event.target.closest('[data-nav]');
