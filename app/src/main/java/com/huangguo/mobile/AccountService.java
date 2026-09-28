@@ -86,7 +86,13 @@ final class AccountService {
 
     synchronized JSONObject login(String username, String password) throws Exception {
         validate(username, password);
-        ParseUser user = ParseUser.logIn(username, password);
+        ParseUser user;
+        try {
+            user = ParseUser.logIn(username, password);
+        } catch (ParseException error) {
+            if (error.getCode() == 101) throw new IllegalArgumentException("账号不存在或密码错误，请检查后重试");
+            throw error;
+        }
         store.activateUser(user.getObjectId());
         try { sync(); } catch (Exception ignored) { /* 登录有效，稍后补同步 */ }
         return profile();
