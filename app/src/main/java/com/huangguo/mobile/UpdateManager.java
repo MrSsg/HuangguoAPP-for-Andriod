@@ -46,6 +46,54 @@ final class UpdateManager {
         preferences = this.context.getSharedPreferences("updates", Context.MODE_PRIVATE);
     }
 
+    synchronized JSONObject cached() throws Exception {
+        String saved = preferences.getString("available_manifest", null);
+        if (saved == null) return status("none");
+        try {
+            JSONObject manifest = new JSONObject(saved);
+            PackageInfo installed = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            long installedCode = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
+            if (manifest.optLong("versionCode") <= installedCode) {
+                clearCandidate();
+                return status("none");
+            }
+            candidate = candidateFrom(manifest);
+            return availableStatus(candidate, installed.versionName);
+        } catch (Exception error) {
+            clearCandidate();
+            return status("none");
+        }
+    }
+
+    private void clearCandidate() {
+        candidate = null;
+        preferences.edit().remove("available_manifest").apply();
+    }
+
+    private static Candidate candidateFrom(JSONObject manifest) {
+        String version = manifest.optString("versionName");
+        String tag = manifest.optString("tag");
+        String apk = manifest.optString("apk");
+        String sha256 = manifest.optString("sha256");
+        if (!VERSION.matcher(version).matches() || !tag.equals("v" + version)
+                || !apk.equals("HuangGuo-Android-v" + version + "-release.apk")
+                || !sha256.matches("[0-9a-fA-F]{64}") || manifest.optLong("size") <= 0) {
+            throw new IllegalStateException("发布信息格式有误");
+        }
+        Candidate result = new Candidate();
+        result.version = version;
+        result.url = RELEASE_BASE + "download/" + tag + "/" + apk;
+        result.digest = "sha256:" + sha256;
+        result.size = manifest.optLong("size");
+        result.notes = manifest.optString("notes");
+        return result;
+    }
+
+    private static JSONObject availableStatus(Candidate value, String localVersion) throws Exception {
+        return status("available").put("version", value.version).put("currentVersion", localVersion)
+                .put("notes", value.notes).put("size", value.size);
+    }
+
     synchronized JSONObject check(boolean manual) throws Exception {
         long now = System.currentTimeMillis();
         if (manual) {
@@ -66,7 +114,7 @@ final class UpdateManager {
             preferences.edit().putString("manual_checks", saved.toString()).apply();
         } else {
             long last = preferences.getLong("last_auto_check", 0);
-            if (last > 0 && now >= last && now - last < AUTO_INTERVAL_MS) return status("skipped");
+            if (last > 0 && now >= last && now - last < AUTO_INTERVAL_MS) return cached();
             preferences.edit().putLong("last_auto_check", now).apply();
         }
 
@@ -75,35 +123,17 @@ final class UpdateManager {
         PackageInfo installed = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
         String localVersion = installed.versionName;
         if (manifest == null) {
-            candidate = null;
+            clearCandidate();
             return status("unpublished");
         }
         long installedCode = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
         if (manifest.optLong("versionCode") <= installedCode) {
-            candidate = null;
+            clearCandidate();
             return status("current").put("version", localVersion);
         }
-        String version = manifest.optString("versionName");
-        String tag = manifest.optString("tag");
-        String apk = manifest.optString("apk");
-        String sha256 = manifest.optString("sha256");
-        if (!VERSION.matcher(version).matches() || !tag.equals("v" + version)
-                || !apk.equals("HuangGuo-Android-v" + version + "-release.apk")
-                || !sha256.matches("[0-9a-fA-F]{64}") || manifest.optLong("size") <= 0) {
-            throw new IllegalStateException("发布信息格式有误");
-        }
-        Candidate newest = new Candidate();
-        newest.version = version;
-        newest.url = RELEASE_BASE + "download/" + tag + "/" + apk;
-        newest.digest = "sha256:" + sha256;
-        newest.size = manifest.getLong("size");
-        newest.notes = manifest.optString("notes");
-        candidate = newest;
-        return status("available")
-                .put("version", newest.version)
-                .put("currentVersion", localVersion)
-                .put("notes", newest.notes)
-                .put("size", newest.size);
+        candidate = candidateFrom(manifest);
+        preferences.edit().putString("available_manifest", manifest.toString()).apply();
+        return availableStatus(candidate, localVersion);
     }
 
     synchronized File download(Progress progress) throws Exception {

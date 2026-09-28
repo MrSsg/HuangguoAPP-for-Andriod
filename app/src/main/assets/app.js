@@ -59,6 +59,8 @@ let bannerTimer;
 let lastDockTap = { tab: '', at: 0, navigated: false };
 let updateChecking = false;
 let updateDownloading = false;
+let updateAvailable = null;
+let appVersion = '';
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const asArray = value => Array.isArray(value) ? value : [];
@@ -170,6 +172,16 @@ window.hgAvatarUpdated = profile => { setAccount(profile); toast('头像已更�
 window.hgAvatarError = message => toast(message || '头像保存失败', true);
 window.hgCloudSynced = () => { if (state.route === 'library') api('library').then(data => { state.library = data; renderLibrary(); }).catch(() => {}); };
 
+function setAvailableUpdate(result) {
+  updateAvailable = result?.status === 'available' ? result : null;
+  headerSettings.classList.toggle('has-update', Boolean(updateAvailable));
+  const versionButton = content.querySelector('[data-open-update]');
+  if (versionButton) {
+    versionButton.classList.toggle('has-update', Boolean(updateAvailable));
+    versionButton.setAttribute('aria-label', updateAvailable ? `当前版本 ${appVersion}，发现新版 ${updateAvailable.version}，查看更新` : `当前版本 ${appVersion}，检查更新`);
+  }
+}
+
 function showUpdate(result) {
   document.getElementById('update-version').textContent = `当前 ${result.currentVersion} · 新版 ${result.version}`;
   const notes = document.getElementById('update-notes');
@@ -187,9 +199,14 @@ async function checkUpdate(manual) {
   updateChecking = true;
   try {
     const result = await api('check-update', { manual });
-    if (result.status === 'available') showUpdate(result);
-    else if (manual && result.status === 'current') toast(`已是最新版本 ${result.version}`);
-    else if (manual && result.status === 'unpublished') toast('暂未发布更新包', true);
+    if (result.status === 'available') {
+      setAvailableUpdate(result);
+      if (manual) showUpdate(result);
+    } else if (result.status === 'current' || result.status === 'unpublished' || result.status === 'none') {
+      setAvailableUpdate(null);
+      if (manual && result.status === 'current') toast(`已是最新版本 ${result.version}`);
+      if (manual && result.status === 'unpublished') toast('暂未发布更新包', true);
+    }
     else if (manual && result.status === 'throttled') toast('一小时内最多手动检查 5 次，请稍后再试', true);
   } catch (error) {
     if (manual) toast(error.message || '检查更新失败，请稍后重试', true);
@@ -596,7 +613,7 @@ function renderSettings() {
     <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
       <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
       <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
-    <section class="update-settings"><div><h2>应用更新</h2><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
+    <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" data-open-update aria-label="${updateAvailable ? `当前版本 ${esc(appVersion)}，发现新版 ${esc(updateAvailable.version)}，查看更新` : `当前版本 ${esc(appVersion)}，检查更新`}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section></div>`;
 }
 
@@ -1265,6 +1282,7 @@ function tapDock(button) {
 }
 
 document.addEventListener('click', async event => {
+  if (event.target.closest('[data-open-update]')) { if (updateAvailable) showUpdate(updateAvailable); else checkUpdate(true); return; }
   if (event.target.closest('[data-check-update]')) { checkUpdate(true); return; }
   if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
   if (event.target.closest('[data-choose-avatar]')) { api('choose-avatar').catch(error => toast(error.message, true)); return; }
@@ -1379,6 +1397,13 @@ content.addEventListener('touchend', event => {
   changeBanner((state.banner + direction + count) % count, direction);
 }, { passive: true });
 
+api('app-version').then(version => {
+  appVersion = String(version || '');
+  const label = content.querySelector('.app-version-text');
+  if (label) label.textContent = `版本 v${appVersion}`;
+  setAvailableUpdate(updateAvailable);
+}).catch(() => {});
+api('cached-update').then(result => { if (result.status === 'available') setAvailableUpdate(result); }).catch(() => {});
 function startHome() { goHome(); setTimeout(() => checkUpdate(false), 3000); }
 document.getElementById('age-confirm').addEventListener('click', () => { localStorage.setItem('adult-confirmed', '1'); document.getElementById('age-gate').hidden = true; startHome(); });
 document.getElementById('age-exit').addEventListener('click', () => api('quit'));

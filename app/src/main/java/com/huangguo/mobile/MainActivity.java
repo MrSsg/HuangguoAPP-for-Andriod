@@ -259,6 +259,8 @@ public final class MainActivity extends Activity {
                 });
                 return true;
             }
+            case "app-version": return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            case "cached-update": return updates.cached();
             case "check-update": return updates.check(args.optBoolean("manual"));
             case "download-update": {
                 File apk = updates.download(percent -> runOnUiThread(() ->
