@@ -144,8 +144,25 @@ public class HotUpdateTest {
         assertTrue(manager.resource(session, "app.html").getResponseHeaders().get("Content-Security-Policy").contains("frame-src 'none'"));
     }
 
+    @Test public void themeOnlyUpdatePreservesLastVerifiedUi() throws Exception {
+        HotUpdateManager manager = manager(); stage(manager, "ui-base");
+        manager.markHealthy(manager.beginSession());
+        stage(manager, "theme-followup");
+        HotUpdateManager.Session next = manager.beginSession();
+        String script = new String(HotUpdateManager.read(manager.resource(next, "app.js").getData(), 4096), StandardCharsets.UTF_8);
+        assertEquals("window.fixtureUi = 'preserved';", script);
+        assertEquals(108, next.revision);
+    }
+
     @Test public void realWebViewConfirmsThemeAndRecoversBrokenUi() throws Exception {
-        HotUpdateManager manager = HotUpdateManager.get(context); stage(manager, "good");
+        HotUpdateManager manager = HotUpdateManager.get(context);
+        File resourceRoot = (File) field(manager, "root");
+        Method remove = HotUpdateManager.class.getDeclaredMethod("delete", File.class); remove.setAccessible(true);
+        synchronized (manager) {
+            File[] files = resourceRoot.listFiles();
+            if (files != null) for (File file : files) remove.invoke(manager, file);
+        }
+        stage(manager, "good");
         // Test package has its own preferences and no user account or viewing data.
         context.getSharedPreferences("hot-updates", 0).edit().putBoolean("originMigrated", true).putBoolean("adultConfirmed", false).commit();
         AppStore store = new AppStore(context);

@@ -226,6 +226,10 @@ final class HotUpdateManager {
             new SiteProfile(context, json(new File(stage, "site.json")));
             validateTheme(stage, json(new File(stage, "theme.json")));
             File ui = new File(stage, "ui");
+            if (!ui.exists() && !meta.optBoolean("resetUi", false) && state.optLong("active") != 0) {
+                File previousUi = new File(directory(state.optLong("active")), "ui");
+                if (previousUi.isDirectory()) copyUi(previousUi, ui, new long[]{total});
+            }
             if (ui.isDirectory() && (!new File(ui, "app.html").isFile() || !new File(ui, "app.js").isFile()
                     || !new File(ui, "app.css").isFile())) throw new IOException("界面包缺少入口文件");
             try (FileOutputStream output = new FileOutputStream(new File(stage, "envelope.json"))) { output.write(envelope); }
@@ -234,6 +238,24 @@ final class HotUpdateManager {
             state.put("pending", revision); save(state);
         } catch (Exception error) { delete(stage); throw error; }
     }
+    private void copyUi(File source, File target, long[] size) throws Exception {
+        if (!source.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator)
+                || !target.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator))
+            throw new IOException("界面目录越界");
+        if (source.isDirectory()) {
+            if (!target.isDirectory() && !target.mkdirs()) throw new IOException("无法保留界面目录");
+            File[] files = source.listFiles();
+            if (files != null) for (File file : files) copyUi(file, new File(target, file.getName()), size);
+        } else {
+            size[0] += source.length();
+            if (size[0] > 25 * 1024 * 1024) throw new IOException("合并后资源包大小超限");
+            try (InputStream input = new FileInputStream(source); FileOutputStream output = new FileOutputStream(target)) {
+                byte[] buffer = new byte[8192]; int length;
+                while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+            }
+        }
+    }
+
     private void validateTheme(File dir, JSONObject theme) throws Exception {
         for (String name : new String[]{"startsAt", "endsAt"}) {
             if (!theme.isNull(name) && theme.has(name)) java.time.Instant.parse(theme.getString(name));
