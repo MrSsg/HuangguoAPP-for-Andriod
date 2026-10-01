@@ -63,6 +63,7 @@
     }
 
     prepare(opening) {
+      this.returning = !opening;
       const origin = this.app.getBoundingClientRect();
       this.width = origin.width; this.height = origin.height;
       this.full = { x: 0, y: 0, w: this.width, h: this.height, radius: 0, shape: 1, contentScale: 1 };
@@ -100,6 +101,11 @@
       // The real source stays in the background; do not show a duplicate beneath the morph.
       this.sourceVisibility = this.source.element.style.visibility;
       this.source.element.style.visibility = 'hidden';
+      const shadow = document.createElement('div');
+      shadow.className = 'card-transition-shadow';
+      shadow.setAttribute('aria-hidden', 'true');
+      shadow.style.width = this.width + 'px'; shadow.style.height = this.height + 'px';
+      this.app.appendChild(shadow); this.shadow = shadow;
       const surface = document.createElement('div');
       surface.className = 'card-transition-surface';
       surface.style.width = `${this.width}px`; surface.style.height = `${this.height}px`;
@@ -156,6 +162,12 @@
       this.surface.style.transform = `translate3d(${x}px,${y}px,0) scale(${sx},${sy})`;
       const corners = this.deviceCorners.map(corner => radius * mix(1, corner / this.deviceRadius, p));
       this.surface.style.borderRadius = `${corners.map(corner => `${corner / sx}px`).join(' ')} / ${corners.map(corner => `${corner / sy}px`).join(' ')}`;
+      // The shadow is a sibling of the clipped surface, so it can extend naturally.
+      this.shadow.style.transform = this.surface.style.transform;
+      this.shadow.style.borderRadius = this.surface.style.borderRadius;
+      const lifted = clamp((1 - Math.min(sx, sy)) / .08);
+      const merging = clamp(p / .18);
+      this.shadow.style.opacity = String(this.returning ? lifted * merging : 0);
       // Counter-scale the page so text and controls never stretch with the card bounds.
       this.body.style.transform = `scale(${geometry.contentScale / sx},${geometry.contentScale / sy})`;
       // During a drag the entire page moves/scales, while its internal layout stays
@@ -221,6 +233,7 @@
     begin() {
       if (['closing', 'closed', 'disposed'].includes(this.phase)) return false;
       if (!this.surface) this.prepare(false);
+      this.returning = true;
       this.stop(); this.phase = 'dragging'; this.dragBase = { ...this.current };
       return true;
     }
@@ -254,6 +267,7 @@
     close() {
       if (this.phase === 'closing') return;
       if (!this.surface) this.prepare(false);
+      this.returning = true;
       this.flush(); this.settle(this.small, true);
     }
 
@@ -300,8 +314,8 @@
     cleanup() {
       this.source.element.style.visibility = this.sourceVisibility || '';
       if (this.stage?.contains(this.snapshot.pageNode)) this.snapshot.pageNode.remove();
-      this.stage?.remove(); this.surface?.remove();
-      this.stage = null; this.surface = null;
+      this.stage?.remove(); this.surface?.remove(); this.shadow?.remove();
+      this.stage = null; this.surface = null; this.shadow = null;
       this.app.classList.remove('card-transition-active');
     }
 

@@ -823,6 +823,7 @@ function setRoute(route) {
   const libraryArea = ['library', 'settings', 'account-management'].includes(route);
   if (state.route === 'library' && route !== 'library') searchInput.value = '';
   state.route = route;
+  window.hgScheduleResourceApply?.();
   document.getElementById('app').dataset.route = route;
   window.hgThemeRefresh?.();
   document.getElementById('app').classList.toggle('route-detail', route === 'detail');
@@ -1286,6 +1287,7 @@ window.hgBack = () => {
   return false;
 };
 window.hgResume = () => {
+  window.hgRefreshPendingResources?.();
   window.hgThemeRefresh?.();
   retryFailedImages(true);
   if (state.route === 'library') goLibrary(state.libraryTab);
@@ -1420,7 +1422,7 @@ document.addEventListener('click', async event => {
     try {
       const result = await api('check-hot-update');
       window.hgHotUpdateStatus(result);
-      toast(result.pending ? '资源更新已下载，下次打开应用时生效' : '已是最新资源');
+      toast(result.pending ? '资源已下载，返回首页空闲时会自动启用' : '已是最新资源');
     } catch (error) { toast(error.message, true); }
     finally { if (button.isConnected) button.disabled = false; }
     return;
@@ -1579,14 +1581,71 @@ api('age-status').then(confirmed => {
   } else document.getElementById('age-gate').hidden = false;
 }).catch(() => { if (localStorage.getItem('adult-confirmed') === '1') startHome(); else document.getElementById('age-gate').hidden = false; });
 
+let pendingResourceRevision = 0;
+let resourceApplyTimer = null;
+let resourceApplyRequested = false;
+let lastResourceInteraction = performance.now();
+const resourceIdleMs = 3000;
 window.hgCanApplyHotUpdate = () => ['home', 'settings'].includes(state.route)
+  && !document.hidden && document.hasFocus()
+  && (state.route !== 'home' || scroll.scrollTop <= 4)
   && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden
   && document.getElementById('age-gate').hidden
-  && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+  && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)
+  && !bannerChanging && !heroTouch && !predictivePreview && !predictiveFrame
+  && !document.getElementById('app').classList.contains('card-transition-active')
+  && !document.getElementById('app').classList.contains('predictive-active');
+function scheduleResourceApply(delay) {
+  if (resourceApplyRequested) return;
+  clearTimeout(resourceApplyTimer);
+  resourceApplyTimer = null;
+  if (!pendingResourceRevision || resourceApplyRequested || document.hidden || !document.hasFocus()) return;
+  resourceApplyTimer = setTimeout(tryApplyResources, delay ?? Math.max(150,
+    resourceIdleMs - (performance.now() - lastResourceInteraction)));
+}
+function tryApplyResources() {
+  resourceApplyTimer = null;
+  if (!pendingResourceRevision || resourceApplyRequested) return;
+  if (state.route !== 'home' || !window.hgCanApplyHotUpdate()
+      || !content.querySelector('.home-page,.error-state')
+      || performance.now() - lastResourceInteraction < resourceIdleMs) {
+    scheduleResourceApply(750);
+    return;
+  }
+  resourceApplyRequested = true;
+  api('apply-hot-update').catch(() => {});
+  // A gesture can start between the JS idle check and the native check. Retry
+  // only if this document remains alive; a successful activation replaces it.
+  resourceApplyTimer = setTimeout(() => {
+    resourceApplyRequested = false;
+    window.hgRefreshPendingResources();
+  }, 2000);
+}
+window.hgScheduleResourceApply = () => { lastResourceInteraction = performance.now(); scheduleResourceApply(); };
+window.hgRefreshPendingResources = () => {
+  if (!document.hidden && document.hasFocus()) api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
+};
 window.hgHotUpdateStatus = result => {
   const label = content.querySelector('[data-resource-status]');
-  if (label) label.textContent = result.pending ? '资源已下载，下次打开时生效。' : '当前资源：' + (result.version || '内置') + '，后台自动更新。';
+  if (label) label.textContent = result.pending ? '资源已下载，首页空闲时自动启用。' : '当前资源：' + (result.version || '内置') + '，后台自动更新。';
   const apply = content.querySelector('[data-apply-resources]');
   if (apply) apply.hidden = !result.pending;
+  pendingResourceRevision = Number(result.pending) > Number(window.HotRuntime?.revision || 0) ? Number(result.pending) : 0;
+  if (!pendingResourceRevision) resourceApplyRequested = false;
+  scheduleResourceApply();
 };
+function resourceInteraction() {
+  lastResourceInteraction = performance.now();
+  if (!resourceApplyRequested) scheduleResourceApply();
+}
+for (const type of ['pointerdown', 'pointermove', 'pointerup', 'keydown', 'input', 'focusin', 'focusout', 'wheel'])
+  document.addEventListener(type, resourceInteraction, { capture: true, passive: true });
+document.addEventListener('scroll', resourceInteraction, { capture: true, passive: true });
+window.addEventListener('blur', () => { clearTimeout(resourceApplyTimer); resourceApplyTimer = null; resourceApplyRequested = false; });
+window.addEventListener('focus', () => { resourceInteraction(); window.hgRefreshPendingResources(); });
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(resourceApplyTimer); resourceApplyTimer = null; resourceApplyRequested = false;
+  if (!document.hidden) { resourceInteraction(); window.hgRefreshPendingResources(); }
+});
+api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
 window.hgBootReady?.();
