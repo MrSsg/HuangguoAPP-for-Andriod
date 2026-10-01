@@ -105,6 +105,9 @@
       shadow.className = 'card-transition-shadow';
       shadow.setAttribute('aria-hidden', 'true');
       shadow.style.width = this.width + 'px'; shadow.style.height = this.height + 'px';
+      // Rasterize the soft edge once; changing its radius in draw() repaints the
+      // viewport-sized shadow on every frame. Transform/opacity stay composited.
+      shadow.style.borderRadius = this.deviceCorners.map(corner => corner + 'px').join(' ');
       this.app.appendChild(shadow); this.shadow = shadow;
       const surface = document.createElement('div');
       surface.className = 'card-transition-surface';
@@ -164,7 +167,6 @@
       this.surface.style.borderRadius = `${corners.map(corner => `${corner / sx}px`).join(' ')} / ${corners.map(corner => `${corner / sy}px`).join(' ')}`;
       // The shadow is a sibling of the clipped surface, so it can extend naturally.
       this.shadow.style.transform = this.surface.style.transform;
-      this.shadow.style.borderRadius = this.surface.style.borderRadius;
       const lifted = clamp((1 - Math.min(sx, sy)) / .08);
       const merging = clamp(p / .18);
       this.shadow.style.opacity = String(this.returning ? lifted * merging : 0);
