@@ -12,6 +12,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.RoundedCorner;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
@@ -46,6 +47,12 @@ public final class MainActivity extends Activity {
     private File pendingUpdateApk;
     private OnBackInvokedCallback backCallback;
     private boolean backRegistered;
+    private int backProgressGeneration;
+    private float pendingBackProgress = -1f;
+    private boolean backProgressInFlight;
+    private int backViewLeft;
+    private int backViewWidth;
+    private float backLeadPx;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -109,6 +116,23 @@ public final class MainActivity extends Activity {
 
     private boolean dark() {
         return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private float screenCornerRadius(int position) {
+        if (Build.VERSION.SDK_INT >= 31) {
+            RoundedCorner corner = getDisplay() == null ? null : getDisplay().getRoundedCorner(position);
+            if (corner != null && corner.getRadius() > 0)
+                return corner.getRadius() / getResources().getDisplayMetrics().density;
+        }
+        return 22f;
+    }
+
+    private JSONObject screenCorners() throws Exception {
+        return new JSONObject()
+                .put("topLeft", screenCornerRadius(RoundedCorner.POSITION_TOP_LEFT))
+                .put("topRight", screenCornerRadius(RoundedCorner.POSITION_TOP_RIGHT))
+                .put("bottomRight", screenCornerRadius(RoundedCorner.POSITION_BOTTOM_RIGHT))
+                .put("bottomLeft", screenCornerRadius(RoundedCorner.POSITION_BOTTOM_LEFT));
     }
 
     private void applyTheme() {
@@ -189,20 +213,26 @@ public final class MainActivity extends Activity {
             if (Build.VERSION.SDK_INT >= 34) {
                 backCallback = new OnBackAnimationCallback() {
                     @Override public void onBackStarted(BackEvent event) {
+                        resetBackProgress();
+                        captureBackGeometry();
                         webView.evaluateJavascript("window.hgPredictiveBackStart && window.hgPredictiveBackStart(" +
                                 (event.getSwipeEdge() == BackEvent.EDGE_RIGHT) + ")", null);
                     }
 
                     @Override public void onBackProgressed(BackEvent event) {
-                        webView.evaluateJavascript("window.hgPredictiveBackProgress && window.hgPredictiveBackProgress(" +
-                                event.getProgress() + ")", null);
+                        pendingBackProgress = backTouchFraction(event);
+                        sendLatestBackProgress();
                     }
 
                     @Override public void onBackCancelled() {
+                        resetBackProgress();
                         webView.evaluateJavascript("window.hgPredictiveBackCancel && window.hgPredictiveBackCancel()", null);
                     }
 
-                    @Override public void onBackInvoked() { handleBack(true); }
+                    @Override public void onBackInvoked() {
+                        resetBackProgress();
+                        handleBack(true);
+                    }
                 };
             } else backCallback = () -> handleBack(false);
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -212,6 +242,47 @@ public final class MainActivity extends Activity {
             backCallback = null;
         }
         backRegistered = enabled;
+    }
+
+    private void resetBackProgress() {
+        backProgressGeneration++;
+        pendingBackProgress = -1f;
+        backProgressInFlight = false;
+    }
+
+    private void captureBackGeometry() {
+        int[] location = new int[2];
+        webView.getLocationOnScreen(location);
+        backViewLeft = location[0];
+        backViewWidth = webView.getWidth();
+        backLeadPx = getResources().getDisplayMetrics().density * 18f;
+    }
+
+    private float backTouchFraction(BackEvent event) {
+        float touchX = event.getTouchX();
+        int edge = event.getSwipeEdge();
+        if (Float.isNaN(touchX) || edge == BackEvent.EDGE_NONE || backViewWidth == 0)
+            return event.getProgress();
+        float width = backViewWidth;
+        float distance = edge == BackEvent.EDGE_RIGHT
+                ? backViewLeft + width - touchX : touchX - backViewLeft;
+        distance = Math.max(0f, distance);
+        float lead = Math.min(backLeadPx, distance * .35f);
+        return Math.min(1f, (distance + lead) / width);
+    }
+
+    private void sendLatestBackProgress() {
+        if (backProgressInFlight || pendingBackProgress < 0 || webView == null) return;
+        float progress = pendingBackProgress;
+        pendingBackProgress = -1f;
+        backProgressInFlight = true;
+        int generation = backProgressGeneration;
+        webView.evaluateJavascript("window.hgPredictiveBackProgress && window.hgPredictiveBackProgress(" +
+                progress + ")", ignored -> {
+            if (generation != backProgressGeneration) return;
+            backProgressInFlight = false;
+            sendLatestBackProgress();
+        });
     }
 
     private void handleBack(boolean predictive) {
@@ -243,6 +314,7 @@ public final class MainActivity extends Activity {
     private Object dispatch(String action, JSONObject args) throws Exception {
         switch (action) {
             case "theme": return dark();
+            case "screen-corners": return screenCorners();
             case "account": return account.profile();
             case "register": return account.register(args.optString("username"), args.optString("password"));
             case "login": return account.login(args.optString("username"), args.optString("password"));

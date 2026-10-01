@@ -39,7 +39,7 @@ const tagGroups = [
 ];
 const state = {
   route: 'home', tab: 'home', sub: { adult: 0, ai: 0 }, home: null,
-  category: null, categoryItems: [], detail: null, sourceItem: null,
+  category: null, categoryItems: [], detail: null, detailLoading: false, sourceItem: null,
   search: null, query: '', filter: 'all', banner: 0,
   listing: null, tags: null, tagsReturn: null, listingReturn: null, settingsReturn: null,
   libraryTab: 'history', libraryQuery: '', accountReturn: null, account: { loggedIn: false },
@@ -53,6 +53,10 @@ let categoryObserver;
 const screenSnapshots = {};
 let predictivePreview;
 let predictiveTimer;
+let predictiveSourceNode;
+let predictiveFrame;
+let pendingPredictiveProgress = 0;
+let detailCard;
 const coverRequests = new Map();
 let bannerChanging = false;
 let bannerTimer;
@@ -112,6 +116,13 @@ function setAccount(profile) {
   if (state.route === 'account-management') renderAccountManagement();
 }
 api('account').then(setAccount).catch(() => {});
+api('screen-corners').then(corners => {
+  const app = document.getElementById('app');
+  for (const name of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft']) {
+    const radius = Number(corners?.[name]);
+    if (radius > 0) app.style.setProperty(`--screen-corner-${name}`, `${radius}px`);
+  }
+}).catch(() => {});
 
 let authMode = 'login';
 let authPending = false;
@@ -694,11 +705,12 @@ function renderListing() {
 function renderDetail() {
   const data = state.detail;
   if (!data) { renderSkeleton(); return; }
+  const loading = state.detailLoading;
   const episodes = asArray(data.episodes);
   content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
-    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${esc(data.score)} ${esc(data.episodeLabel)}</p><p class="detail-description">${esc(data.description || '')}</p>
-    <div class="detail-buttons"><button class="detail-play" type="button" data-play="1">立即播放</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}">${state.bookmarked ? '★' : '☆'}</button></div>
-    ${episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
+    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><p class="detail-description">${esc(data.description || '')}</p>
+    <div class="detail-buttons"><button class="detail-play" type="button" data-play="1" ${loading ? 'disabled' : ''}>${loading ? '正在加载…' : '立即播放'}</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}" ${loading ? 'disabled' : ''}>${state.bookmarked ? '★' : '☆'}</button></div>
+    ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
   hydrateImages();
 }
 
@@ -721,8 +733,10 @@ function renderError(error, retry) {
 
 function rememberScreen() {
   if (state.route === 'detail') return;
+  const previewContent = content.cloneNode(true);
+  previewContent.removeAttribute('id');
   screenSnapshots[state.route] = {
-    content: content.cloneNode(true), scrollTop: scroll.scrollTop,
+    content: previewContent, scrollTop: scroll.scrollTop,
     horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft)
   };
 }
@@ -765,9 +779,11 @@ function restoreScreen(snapshot) {
 
 function setRoute(route) {
   if (route !== 'home') stopBannerAuto();
+  if (state.route === 'detail' && route !== 'detail') { detailCard?.dispose(); detailCard = null; }
   const libraryArea = ['library', 'settings', 'account-management'].includes(route);
   if (state.route === 'library' && route !== 'library') searchInput.value = '';
   state.route = route;
+  document.getElementById('app').classList.toggle('route-detail', route === 'detail');
   headerSettings.hidden = route !== 'library';
   searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : '搜索剧名或 #标签';
   searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
@@ -786,58 +802,100 @@ function backDestination() {
 
 function clearPredictivePreview() {
   clearTimeout(predictiveTimer);
+  if (predictiveFrame) cancelAnimationFrame(predictiveFrame);
+  predictiveFrame = null;
+  if (predictiveSourceNode && predictivePreview?.contains(predictiveSourceNode)) predictiveSourceNode.remove();
+  predictiveSourceNode = null;
   predictivePreview?.remove();
   predictivePreview = null;
   document.getElementById('app').classList.remove('predictive-active');
   scroll.style.removeProperty('transition');
   scroll.style.removeProperty('transform');
-  scroll.style.removeProperty('border-radius');
-  scroll.style.removeProperty('box-shadow');
 }
 
 window.hgPredictiveBackStart = fromRight => {
   clearPredictivePreview();
-  const snapshot = screenSnapshots[backDestination()];
+  if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden) {
+    detailCard.fromRight = fromRight;
+    return detailCard.begin();
+  }
+  const destination = backDestination();
+  const fromDetail = state.route === 'detail' && state.previous?.route === destination && state.previous.pageNode;
+  const snapshot = fromDetail ? state.previous : screenSnapshots[destination];
   if (!snapshot) return false;
   const preview = document.createElement('div');
   preview.className = 'back-preview';
   preview.setAttribute('aria-hidden', 'true');
-  const previous = snapshot.content.cloneNode(true);
-  previous.removeAttribute('id');
-  previous.style.transform = `translateY(${-snapshot.scrollTop}px)`;
-  preview.appendChild(previous);
+  if (state.route === 'detail') {
+    const header = document.querySelector('#app > .app-top').cloneNode(true);
+    const settings = header.querySelector('.header-settings');
+    settings.hidden = destination !== 'library';
+    if (destination === 'library') {
+      const input = header.querySelector('.search-input');
+      input.placeholder = '搜索观看历史和收藏';
+      input.value = state.libraryQuery;
+    }
+    header.querySelectorAll('[id]').forEach(node => node.removeAttribute('id'));
+    preview.appendChild(header);
+  }
+  if (fromDetail) {
+    const holder = document.createElement('div');
+    holder.style.transform = `translateY(${-snapshot.scrollTop}px)`;
+    predictiveSourceNode = snapshot.pageNode;
+    holder.appendChild(predictiveSourceNode);
+    preview.appendChild(holder);
+  } else {
+    predictiveSourceNode = snapshot.content;
+    predictiveSourceNode.style.transform = `translateY(${-snapshot.scrollTop}px)`;
+    preview.appendChild(predictiveSourceNode);
+  }
   document.getElementById('app').appendChild(preview);
   preview.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
     row.scrollLeft = snapshot.horizontalScroll?.[index] || 0;
   });
   document.getElementById('app').classList.add('predictive-active');
+  scroll.style.transition = 'none';
   predictivePreview = preview;
   predictivePreview.fromRight = fromRight;
   return true;
 };
 
 window.hgPredictiveBackProgress = progress => {
+  if (state.route === 'detail' && detailCard?.phase === 'dragging') {
+    detailCard.predictive(Math.max(0, Math.min(1, progress)), detailCard.fromRight);
+    return;
+  }
   if (!predictivePreview) return;
-  const direction = predictivePreview.fromRight ? -1 : 1;
-  const amount = Math.max(0, Math.min(1, progress));
-  scroll.style.transition = 'none';
-  scroll.style.transform = `translateX(${direction * amount * 42}%)`;
-  scroll.style.borderRadius = `${Math.round(amount * 18)}px`;
-  scroll.style.boxShadow = `${-direction * 8}px 0 24px #0003`;
+  pendingPredictiveProgress = Math.max(0, Math.min(1, progress));
+  if (predictiveFrame) return;
+  predictiveFrame = requestAnimationFrame(() => {
+    predictiveFrame = null;
+    if (!predictivePreview) return;
+    const direction = predictivePreview.fromRight ? -1 : 1;
+    scroll.style.transform = `translate3d(${direction * pendingPredictiveProgress * 100}%,0,0)`;
+  });
 };
 
 window.hgPredictiveBackCancel = () => {
+  if (state.route === 'detail' && detailCard?.phase === 'dragging') { detailCard.cancel(); return; }
   if (!predictivePreview) return;
+  if (predictiveFrame) cancelAnimationFrame(predictiveFrame);
+  predictiveFrame = null;
   scroll.style.transition = 'transform 180ms ease-out';
-  scroll.style.transform = 'translateX(0)';
+  scroll.style.transform = 'translate3d(0,0,0)';
   predictiveTimer = setTimeout(clearPredictivePreview, 180);
 };
 
 window.hgPredictiveBackCommit = () => {
+  if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden) {
+    detailCard.close(); return true;
+  }
   if (!predictivePreview) return window.hgBack();
+  if (predictiveFrame) cancelAnimationFrame(predictiveFrame);
+  predictiveFrame = null;
   const direction = predictivePreview.fromRight ? -1 : 1;
   scroll.style.transition = 'transform 150ms ease-out';
-  scroll.style.transform = `translateX(${direction * 100}%)`;
+  scroll.style.transform = `translate3d(${direction * 100}%,0,0)`;
   predictiveTimer = setTimeout(() => {
     const oldPage = content.firstElementChild;
     if (!window.hgBack()) { clearPredictivePreview(); return; }
@@ -1090,16 +1148,25 @@ async function goSearch(query) {
 }
 
 function sourceItem(id) {
-  const candidates = [state.listing?.items, state.home?.featured, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress].flatMap(asArray);
+  const candidates = [state.listing?.items, state.home?.featured, state.home?.homepageRecommend, state.home?.homepageNewest, state.home?.recommend?.items, state.home?.newest?.items, state.category?.items, state.search?.items, state.library?.bookmarks, state.library?.progress].flatMap(asArray);
   return candidates.find(item => item.id === id) || { id, title: `剧集 ${id}` };
 }
-async function goDetail(id) {
+async function goDetail(id, trigger) {
+  if (state.route === 'detail' && state.sourceItem?.id === id) {
+    // Retry in place; preserve the original source card and return destination.
+    state.detailLoading = true; renderDetail();
+    const token = ++routeToken;
+    try { const fresh = await api('detail', { id }); if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); } }
+    catch (error) { if (token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); } }
+    return;
+  }
   const token = ++routeToken;
+  const entrySource = !bannerChanging ? HGCardTransition.capture(trigger) : null;
   rememberScreen();
   state.previous = {
     route: state.route, tab: state.tab, sub: state.sub[state.tab], query: state.query,
     filter: state.filter, scrollTop: scroll.scrollTop, compactHeld: state.compactHeld,
-    horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row')].map(row => row.scrollLeft),
+    horizontalScroll: [...content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll')].map(row => row.scrollLeft),
     pageNode: content.firstElementChild
   };
   if (state.route === 'listing' && state.listing) state.listing.refreshing = false;
@@ -1111,16 +1178,26 @@ async function goDetail(id) {
   const candidates = state.route === 'category' ? asArray(state.category?.items) : state.route === 'search' ? asArray(state.search?.items) : state.route === 'listing' ? asArray(state.listing?.items) :
     [...asArray(state.home?.recommend?.items), ...asArray(state.home?.newest?.items)];
   state.sourceQueue = aiGroup ? candidates.filter(item => item.category === state.sourceGroup) : [];
-  setRoute('detail'); state.detail = null; state.bookmarked = false;
+  setRoute('detail'); state.detail = { ...state.sourceItem }; state.detailLoading = true; state.bookmarked = false;
+  scroll.scrollTop = 0;
   updateCompact();
+  renderDetail();
+  if (entrySource) {
+    detailCard = new HGCardTransition({
+      app: document.getElementById('app'), scroll, content, source: entrySource, snapshot: state.previous,
+      isDetail: () => state.route === 'detail',
+      onClose: () => { returnFromDetail(); trigger?.focus({ preventScroll: true }); }
+    });
+    detailCard.open();
+  }
   const refreshing = api('detail', { id });
   const cached = await api('cached', { key: `detail:${id}` }).catch(() => null);
   if (token !== routeToken) return;
-  state.detail = cached?.data || null;
-  if (state.detail) renderDetail(); else renderSkeleton();
+  let hasDetailData = Boolean(cached?.data);
+  if (hasDetailData) { state.detail = cached.data; state.detailLoading = false; renderDetail(); }
   api('bookmark-state', { id }).then(saved => { if (token === routeToken) { state.bookmarked = saved; if (state.detail) renderDetail(); } }).catch(() => {});
-  try { const fresh = await refreshing; if (token === routeToken) { state.detail = fresh; renderDetail(); } }
-  catch (error) { if (!state.detail && token === routeToken) renderError(error, 'detail'); }
+  try { const fresh = await refreshing; if (token === routeToken) { state.detail = fresh; state.detailLoading = false; renderDetail(); } }
+  catch (error) { if (!hasDetailData && token === routeToken) { state.detailLoading = false; renderError(error, 'detail'); } }
 }
 
 function returnFromDetail() {
@@ -1155,7 +1232,7 @@ window.hgBack = () => {
   if (!updateOverlay.hidden) { if (!updateDownloading) updateOverlay.hidden = true; return true; }
   if (state.route === 'account-management') { restoreScreen(state.accountReturn); return true; }
   if (state.route === 'settings') { restoreScreen(state.settingsReturn); return true; }
-  if (state.route === 'detail') { returnFromDetail(); return true; }
+  if (state.route === 'detail') { if (detailCard) detailCard.close(); else returnFromDetail(); return true; }
   if (state.route === 'listing' && state.listing?.kind === 'tag-list') { restoreScreen(state.listingReturn); return true; }
   if (state.route === 'tags') { restoreScreen(state.tagsReturn); return true; }
   if (state.route === 'listing') { goHome(); return true; }
@@ -1327,7 +1404,7 @@ document.addEventListener('click', async event => {
   const historyCard = event.target.closest('[data-history-id]');
   if (historyCard) {
     const id = historyCard.dataset.historyId;
-    if (historyCard.dataset.historyCompleted === 'true') goDetail(id);
+    if (historyCard.dataset.historyCompleted === 'true') goDetail(id, historyCard);
     else goDetail(id).then(() => openPlayer(Number(historyCard.dataset.historyEpisode || 1)));
     return;
   }
@@ -1337,7 +1414,7 @@ document.addEventListener('click', async event => {
   const sub = event.target.closest('[data-sub]');
   if (sub) { goCategory(state.tab, Number(sub.dataset.sub), !!sub.closest('#compact-category')); return; }
   const card = event.target.closest('[data-open-id]');
-  if (card?.dataset.openId) { goDetail(card.dataset.openId); return; }
+  if (card?.dataset.openId) { goDetail(card.dataset.openId, card); return; }
   const filter = event.target.closest('[data-filter]');
   if (filter) { state.filter = filter.dataset.filter; renderSearch(); return; }
   const slide = event.target.closest('[data-slide]');

@@ -10,8 +10,14 @@ android {
         applicationId 'com.huangguo.mobile'
         minSdk 26
         targetSdk 36
-        versionCode 20
-        versionName '0.1.19'
+        versionCode 30
+        versionName '0.2.0'
+        testInstrumentationRunner 'com.huangguo.mobile.PlaybackTestRunner'
+    }
+
+    // Install device regression tests beside the user's signed app, with separate local data.
+    if (providers.gradleProperty('playbackQa').isPresent()) {
+        buildTypes.debug.applicationIdSuffix = '.playbackqa'
     }
 
     compileOptions {
@@ -22,6 +28,8 @@ android {
 }
 
 dependencies {
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'junit:junit:4.13.2'
     implementation 'androidx.core:core:1.7.0'
     implementation 'com.github.parse-community.Parse-SDK-Android:parse:4.4.0'
     implementation 'org.jsoup:jsoup:1.23.2'

@@ -255,36 +255,37 @@ final class SiteRepository {
 
     JSONObject detail(String id) throws Exception {
         if (!id.matches("\\d+")) throw new IllegalArgumentException("无效剧集");
-        Document document = page("/detail/" + id + "/");
-        Element root = document.selectFirst(".hg-web-detail");
-        if (root == null) throw new IllegalStateException("未找到剧集详情");
+        Document document = page("/video/" + id + "/");
+        Element node = document.selectFirst("#videoInitialData");
+        if (node == null) throw new IllegalStateException("未找到剧集详情");
+        JSONObject data = new JSONObject(node.data().isEmpty() ? node.text() : node.data());
+        if (!id.equals(String.valueOf(data.opt("id")))) throw new IllegalStateException("剧集详情不匹配");
         JSONObject result = new JSONObject();
         result.put("id", id);
-        result.put("title", text(root.selectFirst("h1")));
-        Element image = root.selectFirst(".hg-web-detail__poster img");
-        String cover = attr(image, "data-src");
-        result.put("cover", cover.isEmpty() ? attr(image, "src") : cover);
-        result.put("description", text(root.selectFirst(".hg-web-detail__desc")));
-        result.put("score", text(root.selectFirst(".hg-web-detail__score")));
-        result.put("episodeLabel", text(root.selectFirst(".hg-web-detail__episode")));
+        result.put("title", data.optString("title"));
+        result.put("cover", data.optString("coverSrc", data.optString("posterSrc")));
+        result.put("description", data.optString("description"));
+        result.put("score", text(document.selectFirst(".hg-play__scorenum, .hg-web-play__scorenum")));
         JSONArray tags = new JSONArray();
-        for (Element tag : root.select(".hg-web-detail__tags a")) {
+        JSONArray siteTags = data.optJSONArray("tags");
+        for (int i = 0; siteTags != null && i < siteTags.length(); i++) {
             if (tags.length() >= 5) break;
-            String value = text(tag);
+            String value = siteTags.optString(i).trim();
             if (!value.isEmpty()) tags.put(value);
         }
         result.put("tags", tags);
         JSONArray episodes = new JSONArray();
-        for (Element link : root.select(".hg-web-detail__ep-grid a[href]")) {
+        Set<Integer> seenEpisodes = new HashSet<>();
+        for (Element link : document.select("a[href]")) {
             String href = link.attr("href");
             java.util.regex.Matcher match = java.util.regex.Pattern.compile("^/video/" + id + "/(?:ep-(\\d+)/)?$").matcher(href);
-            if (!match.find()) continue;
+            if (!match.matches()) continue;
             int number = match.group(1) == null ? 1 : Integer.parseInt(match.group(1));
+            if (!seenEpisodes.add(number)) continue;
             episodes.put(new JSONObject().put("number", number).put("url", ORIGIN + href));
         }
-        if (episodes.length() == 0 && root.selectFirst("a[href=/video/" + id + "/]") != null) {
-            episodes.put(new JSONObject().put("number", 1).put("url", ORIGIN + "/video/" + id + "/"));
-        }
+        if (episodes.length() == 0) throw new IllegalStateException("未找到选集列表");
+        result.put("episodeLabel", "共 " + episodes.length() + " 集");
         result.put("episodes", episodes);
         return result;
     }
@@ -312,7 +313,8 @@ final class SiteRepository {
     String coverData(String value) throws Exception {
         URL url = new URL(value);
         if (!"https".equals(url.getProtocol()) ||
-                !("pic.fisawck.cn".equals(url.getHost()) || "pic.tkzdds.cn".equals(url.getHost()))) {
+                !("pic.fisawck.cn".equals(url.getHost()) || "pic.tkzdds.cn".equals(url.getHost()) ||
+                        "pic.wirqed.cn".equals(url.getHost()))) {
             throw new IllegalArgumentException("无效封面地址");
         }
         String path = url.getPath();

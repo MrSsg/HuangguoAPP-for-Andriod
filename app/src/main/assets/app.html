@@ -14,11 +14,11 @@
         <img class="account-avatar-default" src="user.svg" alt="">
         <img id="account-avatar-image" alt="" hidden>
       </button>
-      <form id="search-form" role="search">
+      <form id="search-form" class="search-form" role="search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>
-        <input id="search-input" type="search" placeholder="搜索剧名或 #标签" autocomplete="off" aria-label="搜索剧名或标签">
+        <input id="search-input" class="search-input" type="search" placeholder="搜索剧名或 #标签" autocomplete="off" aria-label="搜索剧名或标签">
       </form>
-      <button id="header-settings" type="button" aria-label="设置" hidden><img src="settings.svg" alt=""></button>
+      <button id="header-settings" class="header-settings" type="button" aria-label="设置" hidden><img src="settings.svg" alt=""></button>
     </header>
     <main id="scroll"><div id="content"></div></main>
     <div id="compact-category" aria-hidden="true"></div>
@@ -70,6 +70,9 @@
       <button id="age-exit" type="button">退出应用</button>
     </div>
   </div>
+  <script src="vendor/rematrix-0.2.2.js"></script>
+  <script src="vendor/flip-toolkit-7.2.6.js"></script>
+  <script src="card-transition.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

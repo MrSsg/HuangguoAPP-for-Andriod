@@ -21,6 +21,7 @@
         </provider>
         <activity
             android:name=".PlayerActivity"
+            android:enableOnBackInvokedCallback="true"
             android:exported="false"
             android:configChanges="orientation|screenSize|uiMode" />
         <activity

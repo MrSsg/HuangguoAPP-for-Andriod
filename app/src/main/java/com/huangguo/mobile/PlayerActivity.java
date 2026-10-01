@@ -2,6 +2,7 @@ package com.huangguo.mobile;
 
 import android.app.Activity;
 import android.animation.ValueAnimator;
+import android.os.Build;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -22,7 +23,11 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.animation.PathInterpolator;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageButton;
@@ -40,24 +45,46 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.SeekParameters;
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
 import androidx.media3.ui.AspectRatioFrameLayout;
-import androidx.media3.datasource.DefaultHttpDataSource;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.concurrent.Future;
+import android.view.TextureView;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+@androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 public final class PlayerActivity extends Activity {
     private static final int YELLOW = Color.rgb(255, 212, 91);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newFixedThreadPool(3);
-    private final Map<String, JSONObject> episodeCache = new HashMap<>();
+    private final Map<String, JSONObject> episodeCache = new LinkedHashMap<String, JSONObject>() {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, JSONObject> eldest) { return size() > 32; }
+    };
+    private final ExecutorService prefetchWorker = Executors.newSingleThreadExecutor();
+    private Future<?> sourceTask;
+    private Future<?> prefetchTask;
+    private int prefetchToken;
+    private boolean foreground;
+    private boolean destroyed;
+    private boolean activeFirstFrame;
+    private boolean switching;
+    private long switchStartedAt;
+    private int incomingDirection;
+    private ExoPlayer standbyPlayer;
+    private EpisodeLoadControl standbyLoadControl;
+    private String standbyKey;
+    private String standbySource;
+    private String failedStandbyKey;
+    private boolean standbyFirstFrame;
+    private PlayerView activeView;
+    private PlayerView standbyView;
     private final Map<String, Bitmap> posterCache = new HashMap<>();
     private SiteRepository repository;
     private AppStore store;
@@ -84,6 +111,7 @@ public final class PlayerActivity extends Activity {
     private TextView previewTime;
     private TextView previewHint;
     private ImageButton volumeButton;
+    private ImageButton fullscreenButton;
     private LinearLayout controls;
     private FrameLayout miniProgress;
     private View miniProgressFill;
@@ -158,6 +186,10 @@ public final class PlayerActivity extends Activity {
     };
     private boolean episodesOpen;
     private int sourceRetryCount;
+    private boolean fullscreenMode;
+    private boolean videoLandscape;
+    private int navigationInsetBottom;
+    private OnBackInvokedCallback backCallback;
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
@@ -169,6 +201,7 @@ public final class PlayerActivity extends Activity {
                 updateMiniProgress(position, duration);
                 timeText.setText(clock(position) + " / " + clock(duration));
                 if (System.currentTimeMillis() - lastSaved > 5000) saveProgress(false);
+                maybePrepareNext();
             }
             handler.postDelayed(this, 500);
         }
@@ -185,9 +218,20 @@ public final class PlayerActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 29) getWindow().setNavigationBarContrastEnforced(false);
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        updateSystemBars();
+        if (Build.VERSION.SDK_INT >= 33) {
+            backCallback = this::handlePlayerBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+        }
         repository = new SiteRepository(this);
         store = new AppStore(this);
         try {
@@ -208,19 +252,28 @@ public final class PlayerActivity extends Activity {
         } catch (Exception error) { finish(); return; }
 
         buildUi();
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(20_000).setReadTimeoutMs(25_000)
-                .setUserAgent("Mozilla/5.0 (Linux; Android) HuangGuo/0.1");
-        player = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http)).build();
-        ((PlayerView) mediaLayer.getChildAt(0)).setPlayer(player);
-        player.addListener(new Player.Listener() {
+        player = createEpisodePlayer(false);
+        activeView.setPlayer(player);
+        loadSelection();
+        handler.post(tick);
+    }
+
+    private ExoPlayer createEpisodePlayer(boolean standby) {
+        EpisodeLoadControl control = new EpisodeLoadControl(standby);
+        ExoPlayer engine = new ExoPlayer.Builder(this).setLoadControl(control)
+                .setMediaSourceFactory(VideoPlaybackCache.sources(this)).build();
+        if (standby) standbyLoadControl = control;
+        engine.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
+                if (engine != player || currentSource == null || destroyed) return;
                 if (state == Player.STATE_READY) {
-                    loading.setVisibility(View.GONE);
+                    if (activeFirstFrame) loading.setVisibility(View.GONE);
                     message.setVisibility(View.GONE);
-                } else if (state == Player.STATE_BUFFERING) loading.setVisibility(View.VISIBLE);
-                else if (state == Player.STATE_ENDED) {
+                    maybePrepareNext();
+                } else if (state == Player.STATE_BUFFERING) {
+                    loading.setVisibility(View.VISIBLE);
+                    cancelPrefetch();
+                } else if (state == Player.STATE_ENDED) {
                     saveProgress(true);
                     if (!isAiQueue()) {
                         Selection next = adjacent(1);
@@ -229,48 +282,128 @@ public final class PlayerActivity extends Activity {
                 }
             }
             @Override public void onRenderedFirstFrame() {
-                poster.setVisibility(View.GONE);
-                skeleton.setVisibility(View.GONE);
-                loading.setVisibility(View.GONE);
-                sourceRetryCount = 0;
+                if (destroyed) return;
+                if (engine == standbyPlayer) { standbyFirstFrame = true; return; }
+                if (engine != player || currentSource == null) return;
+                activeFirstFrame = true;
+                showActiveFrame();
+                Log.d("HuangGuoPlayback", "first-frame " + cacheKey(currentId, currentEpisode)
+                        + " after " + (SystemClock.elapsedRealtime() - switchStartedAt) + "ms");
             }
             @Override public void onIsPlayingChanged(boolean playing) {
+                if (engine != player || destroyed) return;
                 playButton.setImageResource(playing ? R.drawable.player_pause : R.drawable.player_play);
                 centerToggle.setImageResource(playing ? R.drawable.player_pause : R.drawable.player_play);
                 revealControls();
             }
             @Override public void onVideoSizeChanged(androidx.media3.common.VideoSize size) {
-                ((PlayerView) mediaLayer.getChildAt(0)).setResizeMode(
-                        size.width > 0 && size.height > 0 && (double) size.width / size.height < 0.9
-                                ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM : AspectRatioFrameLayout.RESIZE_MODE_FIT);
+                if (engine == standbyPlayer) resizeVideo(standbyView, size);
+                if (engine == player) updateVideoGeometry(size);
             }
             @Override public void onPlayerError(PlaybackException error) {
+                if (engine == standbyPlayer) {
+                    failedStandbyKey = standbyKey;
+                    releaseStandby();
+                    Log.w("HuangGuoPlayback", "Next episode preparation failed", error);
+                    return;
+                }
+                if (engine != player || currentSource == null || destroyed) return;
+                cancelPrefetch();
                 if (hasTimeout(error) && sourceRetryCount < 2) {
                     int attempt = ++sourceRetryCount;
-                    long position = player.getCurrentPosition();
+                    int token = loadToken;
+                    long position = engine.getCurrentPosition();
                     loading.setVisibility(View.VISIBLE);
                     message.setVisibility(View.GONE);
-                    Log.w("HuangGuo", "Transient HLS timeout, retry " + attempt);
                     handler.postDelayed(() -> {
-                        if (player == null || isFinishing()) return;
-                        player.prepare();
-                        player.seekTo(position);
-                        player.play();
+                        if (token != loadToken || engine != player || destroyed || isFinishing()) return;
+                        engine.prepare();
+                        engine.seekTo(position);
+                        engine.setPlayWhenReady(foreground);
                     }, 700L * attempt);
                     return;
                 }
                 loading.setVisibility(View.GONE);
                 message.setText("播放失败，点击重试");
                 message.setVisibility(View.VISIBLE);
-                message.setOnClickListener(view -> loadSelection(false));
+                message.setOnClickListener(view -> loadSelection());
                 Log.e("HuangGuo", "Player error", error);
             }
         });
-        loadSelection(true);
-        handler.post(tick);
+        return engine;
+    }
+
+    private void resizeVideo(PlayerView view, androidx.media3.common.VideoSize size) {
+        view.setResizeMode(size.width > 0 && size.height > 0
+                && (double) size.width * size.pixelWidthHeightRatio / size.height < 0.9
+                ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM : AspectRatioFrameLayout.RESIZE_MODE_FIT);
+    }
+
+    private void updateVideoGeometry(androidx.media3.common.VideoSize size) {
+        resizeVideo(activeView, size);
+        if (size.width > 0 && size.height > 0) {
+            videoLandscape = (double) size.width * size.pixelWidthHeightRatio >= size.height;
+            if (fullscreenMode) applyFullscreenOrientation();
+        }
+    }
+
+    private void showActiveFrame() {
+        poster.setVisibility(View.GONE);
+        skeleton.setVisibility(View.GONE);
+        loading.setVisibility(View.GONE);
+        sourceRetryCount = 0;
     }
 
     private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
+
+    private void updateSystemBars() {
+        int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        if (fullscreenMode && Build.VERSION.SDK_INT < 30) flags |= View.SYSTEM_UI_FLAG_FULLSCREEN;
+        getWindow().getDecorView().setSystemUiVisibility(flags);
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsAppearance(0,
+                        WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS |
+                                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+                controller.show(WindowInsets.Type.navigationBars());
+                if (fullscreenMode) controller.hide(WindowInsets.Type.statusBars());
+                else controller.show(WindowInsets.Type.statusBars());
+            }
+        }
+    }
+
+    private void applyFullscreenOrientation() {
+        int target = fullscreenMode && videoLandscape ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+        if (getRequestedOrientation() != target) setRequestedOrientation(target);
+    }
+
+    private void setFullscreenMode(boolean enabled) {
+        if (fullscreenMode == enabled) return;
+        fullscreenMode = enabled;
+        fullscreenButton.setImageResource(enabled ? R.drawable.player_shrink : R.drawable.player_fullscreen);
+        fullscreenButton.setContentDescription(enabled ? "退出全屏" : "全屏");
+        updateSystemBars();
+        applyFullscreenOrientation();
+        revealControls();
+    }
+
+    private boolean edgeGestureStart(float y) {
+        int top = dp(64);
+        int bottom = dp(88);
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsets insets = root.getRootWindowInsets();
+            if (insets != null) {
+                android.graphics.Insets gestures = insets.getInsets(WindowInsets.Type.systemGestures());
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = Math.max(top, Math.max(gestures.top, bars.top) + dp(24));
+                bottom = Math.max(bottom, Math.max(gestures.bottom, bars.bottom) + dp(24));
+            }
+        }
+        return y < top || y > root.getHeight() - bottom;
+    }
 
     private GradientDrawable background(int color, int radius) {
         GradientDrawable drawable = new GradientDrawable();
@@ -303,9 +436,11 @@ public final class PlayerActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         setContentView(root);
         mediaLayer = new FrameLayout(this);
-        PlayerView view = new PlayerView(this);
-        view.setUseController(false);
-        mediaLayer.addView(view, new FrameLayout.LayoutParams(-1, -1));
+        activeView = (PlayerView) getLayoutInflater().inflate(R.layout.episode_player, mediaLayer, false);
+        standbyView = (PlayerView) getLayoutInflater().inflate(R.layout.episode_player, mediaLayer, false);
+        standbyView.setAlpha(0f);
+        mediaLayer.addView(activeView);
+        mediaLayer.addView(standbyView);
         skeleton = new ShimmerView(this);
         mediaLayer.addView(skeleton, new FrameLayout.LayoutParams(-1, -1));
         poster = new ImageView(this);
@@ -327,7 +462,7 @@ public final class PlayerActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(dp(4), dp(12), dp(16), dp(10));
         ImageButton back = icon(R.drawable.player_back, "返回详情");
-        back.setOnClickListener(v -> finish());
+        back.setOnClickListener(v -> handlePlayerBack());
         top.addView(back, new LinearLayout.LayoutParams(dp(38), dp(38)));
         title = label("", 16, Color.WHITE);
         title.setTypeface(null, Typeface.BOLD);
@@ -444,14 +579,10 @@ public final class PlayerActivity extends Activity {
             @Override public void onStopTrackingTouch(SeekBar bar) { revealControls(); }
         });
         buttons.addView(volumeSeek, new LinearLayout.LayoutParams(dp(68), dp(38)));
-        ImageButton fullscreen = icon(R.drawable.player_fullscreen, "全屏");
-        fullscreen.setBackgroundColor(Color.TRANSPARENT);
-        fullscreen.setOnClickListener(v -> {
-            boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
-            setRequestedOrientation(landscape ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT : ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
-            fullscreen.setImageResource(landscape ? R.drawable.player_fullscreen : R.drawable.player_shrink);
-        });
-        buttons.addView(fullscreen, new LinearLayout.LayoutParams(dp(36), dp(38)));
+        fullscreenButton = icon(R.drawable.player_fullscreen, "全屏");
+        fullscreenButton.setBackgroundColor(Color.TRANSPARENT);
+        fullscreenButton.setOnClickListener(v -> setFullscreenMode(!fullscreenMode));
+        buttons.addView(fullscreenButton, new LinearLayout.LayoutParams(dp(36), dp(38)));
         speedTrigger = label("1×", 12, 0xFFF5D782);
         speedTrigger.setGravity(Gravity.CENTER);
         speedTrigger.setBackgroundColor(Color.TRANSPARENT);
@@ -476,6 +607,32 @@ public final class PlayerActivity extends Activity {
         miniParams.rightMargin = dp(5);
         miniParams.bottomMargin = dp(14);
         root.addView(miniProgress, miniParams);
+        root.setOnApplyWindowInsetsListener((viewRoot, insets) -> {
+            int topInset = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.statusBars()).top : insets.getSystemWindowInsetTop();
+            int bottomInset = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.navigationBars()).bottom : insets.getSystemWindowInsetBottom();
+            navigationInsetBottom = bottomInset;
+            FrameLayout.LayoutParams titleLayout = (FrameLayout.LayoutParams) top.getLayoutParams();
+            int titleMargin = Math.max(dp(24), topInset + dp(8));
+            if (titleLayout.topMargin != titleMargin) {
+                titleLayout.topMargin = titleMargin;
+                top.setLayoutParams(titleLayout);
+            }
+            FrameLayout.LayoutParams controlsLayout = (FrameLayout.LayoutParams) controls.getLayoutParams();
+            if (controlsLayout.bottomMargin != bottomInset) {
+                controlsLayout.bottomMargin = bottomInset;
+                controls.setLayoutParams(controlsLayout);
+            }
+            FrameLayout.LayoutParams progressLayout = (FrameLayout.LayoutParams) miniProgress.getLayoutParams();
+            if (progressLayout.bottomMargin != bottomInset + dp(14)) {
+                progressLayout.bottomMargin = bottomInset + dp(14);
+                miniProgress.setLayoutParams(progressLayout);
+            }
+            return insets;
+        });
+        root.requestApplyInsets();
+        updateSystemBars();
         updateControlLayout();
     }
 
@@ -535,7 +692,7 @@ public final class PlayerActivity extends Activity {
         }
         speedPanel.addView(grid);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(90);
+        params.bottomMargin = navigationInsetBottom + dp(90);
         root.addView(speedPanel, params);
     }
 
@@ -570,6 +727,7 @@ public final class PlayerActivity extends Activity {
 
     private void startSeekPreview(SeekBar bar) {
         seeking = true;
+        cancelPrefetch();
         revealControls();
         handler.removeCallbacks(hideControls);
         previewHint.setVisibility(View.GONE);
@@ -606,11 +764,10 @@ public final class PlayerActivity extends Activity {
 
     private void ensurePreviewPlayer() {
         if (previewPlayer != null) return;
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(20_000).setReadTimeoutMs(25_000)
-                .setUserAgent("Mozilla/5.0 (Linux; Android) HuangGuo/0.1");
+        cancelPrefetch();
         previewPlayer = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http)).build();
+                .setLoadControl(new EpisodeLoadControl(true))
+                .setMediaSourceFactory(VideoPlaybackCache.sources(this)).build();
         previewPlayer.setTrackSelectionParameters(previewPlayer.getTrackSelectionParameters().buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true).build());
         previewPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC);
@@ -691,7 +848,7 @@ public final class PlayerActivity extends Activity {
         synchronized (posterCache) { cached = posterCache.get(url); }
         if (cached != null) {
             target.setImageBitmap(cached);
-            if (target == poster) { target.setVisibility(View.VISIBLE); skeleton.setVisibility(View.GONE); }
+            if (target == poster && !activeFirstFrame) { target.setVisibility(View.VISIBLE); skeleton.setVisibility(View.GONE); }
             return;
         }
         worker.execute(() -> {
@@ -702,23 +859,43 @@ public final class PlayerActivity extends Activity {
                 if (bitmap == null) return;
                 synchronized (posterCache) { posterCache.put(url, bitmap); }
                 runOnUiThread(() -> {
-                    if (!isFinishing() && url.equals(target.getTag())) {
+                    if (!destroyed && !isFinishing() && url.equals(target.getTag())) {
                         target.setImageBitmap(bitmap);
-                        if (target == poster) { target.setVisibility(View.VISIBLE); skeleton.setVisibility(View.GONE); }
+                        if (target == poster && !activeFirstFrame) { target.setVisibility(View.VISIBLE); skeleton.setVisibility(View.GONE); }
                     }
                 });
             } catch (Exception ignored) { }
         });
     }
 
-    private void loadSelection(boolean initial) {
+    private long resumePosition(String id, int episode) {
+        JSONObject progress = store.getProgress(id, episode);
+        if (progress == null || progress.optBoolean("completed")) return 0;
+        long position = progress.optLong("position");
+        return position > 0 && position < progress.optLong("duration") ? position : 0;
+    }
+
+    private void loadSelection() {
         final int token = ++loadToken;
+        final String id = currentItem.optString("id");
+        final int episode = currentEpisode;
+        final String key = cacheKey(id, episode);
+        switchStartedAt = SystemClock.elapsedRealtime();
+        if (sourceTask != null) sourceTask.cancel(true);
         stopSeekPreview();
+        boolean reuse = key.equals(standbyKey) && standbyPlayer != null && standbyPlayer.getPlayerError() == null;
+        float volume = player.getVolume();
+        player.pause();
         currentSource = null;
-        String id = currentItem.optString("id");
+        activeFirstFrame = false;
+        failedStandbyKey = null;
         currentId = id;
-        title.setText(currentItem.optString("title") + " · 第 " + currentEpisode + " 集");
-        episodeText.setText(isAiQueue() ? "AI 作品" : "第 " + currentEpisode + " 集");
+        title.setText(currentItem.optString("title") + " · 第 " + episode + " 集");
+        episodeText.setText(isAiQueue() ? "AI 作品" : "第 " + episode + " 集");
+        seekBar.setProgress(0);
+        landscapeSeek.setProgress(0);
+        updateMiniProgress(0, 1);
+        timeText.setText("0:00 / 0:00");
         skeleton.setVisibility(View.VISIBLE);
         poster.setVisibility(View.INVISIBLE);
         poster.setImageDrawable(null);
@@ -726,63 +903,162 @@ public final class PlayerActivity extends Activity {
         centerToggle.setVisibility(View.GONE);
         message.setVisibility(View.GONE);
         sourceRetryCount = 0;
+        if (reuse) {
+            ExoPlayer old = player;
+            activeView.setPlayer(null);
+            activeView.setAlpha(0f);
+            PlayerView oldView = activeView;
+            activeView = standbyView;
+            standbyView = oldView;
+            player = standbyPlayer;
+            currentSource = standbySource;
+            activeFirstFrame = standbyFirstFrame;
+            standbyLoadControl.promote();
+            standbyPlayer = null;
+            standbyKey = null;
+            standbySource = null;
+            standbyFirstFrame = false;
+            cancelPrefetch();
+            old.release();
+            activeView.setAlpha(1f);
+            player.setVolume(volume);
+            applyPlaybackSpeed(speedLocked ? 2f : manualSpeed);
+            updateVideoGeometry(player.getVideoSize());
+            if (activeFirstFrame) showActiveFrame();
+            else loadPoster(currentItem, poster);
+            player.setPlayWhenReady(foreground);
+            Log.d("HuangGuoPlayback", "reuse " + key + " firstFrame=" + activeFirstFrame);
+            maybePrepareNext();
+            return;
+        }
+        cancelPrefetch();
         loadPoster(currentItem, poster);
         player.stop();
         player.clearMediaItems();
-        worker.execute(() -> {
+        sourceTask = worker.submit(() -> {
             try {
                 JSONObject data;
-                synchronized (episodeCache) { data = episodeCache.get(cacheKey(id, currentEpisode)); }
-                if (data == null) data = repository.episode(id, currentEpisode);
+                synchronized (episodeCache) { data = episodeCache.get(key); }
+                if (data == null) data = repository.episode(id, episode);
+                if (Thread.currentThread().isInterrupted()) return;
                 JSONObject ready = data;
+                synchronized (episodeCache) { episodeCache.put(key, ready); }
                 runOnUiThread(() -> {
-                    if (token != loadToken || isFinishing()) return;
+                    if (token != loadToken || destroyed || isFinishing()) return;
                     currentSource = ready.optString("source");
-                    MediaItem item = new MediaItem.Builder().setUri(ready.optString("source"))
-                            .setMimeType(MimeTypes.APPLICATION_M3U8).build();
-                    player.setMediaItem(item);
+                    player.setMediaItem(new MediaItem.Builder().setUri(currentSource).setMediaId(key)
+                            .setMimeType(MimeTypes.APPLICATION_M3U8).build(), resumePosition(id, episode));
                     applyPlaybackSpeed(speedLocked ? 2f : manualSpeed);
-                    JSONObject progress = store.getProgress(id, currentEpisode);
-                    if (initial && progress != null && !progress.optBoolean("completed")) {
-                        long position = progress.optLong("position");
-                        long duration = progress.optLong("duration");
-                        if (position < duration - 3000) player.seekTo(position);
-                    }
                     player.prepare();
-                    player.play();
-                    prefetchAdjacent();
+                    player.setPlayWhenReady(foreground);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    if (token != loadToken) return;
+                    if (token != loadToken || destroyed || isFinishing()) return;
                     loading.setVisibility(View.GONE);
                     message.setText("加载失败，点击重试");
                     message.setVisibility(View.VISIBLE);
-                    message.setOnClickListener(view -> loadSelection(false));
+                    message.setOnClickListener(view -> loadSelection());
                 });
-                Log.e("HuangGuo", "Episode failed", error);
+                if (!Thread.currentThread().isInterrupted()) Log.e("HuangGuo", "Episode failed", error);
             }
         });
     }
 
-    private void prefetchAdjacent() {
-        for (int direction : new int[]{1, -1}) {
-            Selection selection = adjacent(direction);
-            if (selection == null) continue;
-            String id = selection.item.optString("id");
-            String key = cacheKey(id, selection.episode);
-            loadPoster(selection.item, incoming);
-            worker.execute(() -> {
-                try {
-                    synchronized (episodeCache) { if (episodeCache.containsKey(key)) return; }
-                    JSONObject data = repository.episode(id, selection.episode);
-                    synchronized (episodeCache) { episodeCache.put(key, data); }
-                } catch (Exception ignored) { }
-            });
+    private void maybePrepareNext() {
+        if (!foreground || destroyed || seeking || previewPlayer != null || switching || player == null
+                || currentSource == null || !activeFirstFrame || player.getPlaybackState() != Player.STATE_READY) return;
+        long ahead = player.getBufferedPosition() - player.getCurrentPosition();
+        boolean fullyBuffered = player.getDuration() > 0 && player.getBufferedPosition() >= player.getDuration();
+        if (!fullyBuffered && ahead < 2_000 && standbyPlayer != null) cancelPrefetch();
+        if (ahead < 10_000 && !fullyBuffered) return;
+        Selection next = adjacent(1);
+        if (next == null) return;
+        String id = next.item.optString("id");
+        String key = cacheKey(id, next.episode);
+        if (standbyPlayer != null || prefetchTask != null || key.equals(failedStandbyKey)) return;
+        int token = ++prefetchToken;
+        int selectionToken = loadToken;
+        prefetchTask = prefetchWorker.submit(() -> {
+            try {
+                JSONObject data;
+                synchronized (episodeCache) { data = episodeCache.get(key); }
+                if (data == null) data = repository.episode(id, next.episode);
+                if (Thread.currentThread().isInterrupted()) return;
+                JSONObject ready = data;
+                synchronized (episodeCache) { episodeCache.put(key, ready); }
+                runOnUiThread(() -> {
+                    if (token != prefetchToken || selectionToken != loadToken || destroyed) return;
+                    prefetchTask = null;
+                    if (!foreground || seeking || switching || player.getPlaybackState() != Player.STATE_READY) return;
+                    long buffered = player.getBufferedPosition();
+                    if (buffered - player.getCurrentPosition() < 10_000
+                            && (player.getDuration() <= 0 || buffered < player.getDuration())) return;
+                    standbyKey = key;
+                    standbySource = ready.optString("source");
+                    standbyFirstFrame = false;
+                    standbyPlayer = createEpisodePlayer(true);
+                    standbyPlayer.setVolume(0f);
+                    standbyPlayer.setPlayWhenReady(false);
+                    standbyView.setAlpha(0f);
+                    standbyView.setPlayer(standbyPlayer);
+                    standbyPlayer.setMediaItem(new MediaItem.Builder().setUri(standbySource).setMediaId(key)
+                            .setMimeType(MimeTypes.APPLICATION_M3U8).build(), resumePosition(id, next.episode));
+                    standbyPlayer.prepare();
+                    Log.d("HuangGuoPlayback", "prepare-next " + key);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (token != prefetchToken || destroyed) return;
+                    prefetchTask = null;
+                    failedStandbyKey = key;
+                });
+            }
+        });
+    }
+
+    private void releaseStandby() {
+        if (standbyView != null) {
+            standbyView.setPlayer(null);
+            standbyView.setAlpha(0f);
         }
+        if (standbyPlayer != null) standbyPlayer.release();
+        standbyPlayer = null;
+        standbyLoadControl = null;
+        standbyKey = null;
+        standbySource = null;
+        standbyFirstFrame = false;
+    }
+
+    private void cancelPrefetch() {
+        ++prefetchToken;
+        if (prefetchTask != null) prefetchTask.cancel(true);
+        prefetchTask = null;
+        releaseStandby();
+    }
+
+    private void showIncoming(Selection selection, int direction) {
+        incoming.setImageDrawable(null);
+        incoming.setTag(null);
+        incoming.setVisibility(View.VISIBLE);
+        incomingDirection = direction;
+        if (standbyFirstFrame && cacheKey(selection.item.optString("id"), selection.episode).equals(standbyKey)
+                && standbyView.getVideoSurfaceView() instanceof TextureView) {
+            Bitmap frame = ((TextureView) standbyView.getVideoSurfaceView()).getBitmap();
+            if (frame != null) {
+                incoming.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                incoming.setImageBitmap(frame);
+                return;
+            }
+        }
+        incoming.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        loadPoster(selection.item, incoming);
     }
 
     private void switchTo(Selection selection) {
+        switching = false;
+        mediaLayer.animate().cancel();
+        incoming.animate().cancel();
         closeSpeedPanel();
         if (episodesOpen) closeEpisodes();
         saveProgress(false);
@@ -794,16 +1070,16 @@ public final class PlayerActivity extends Activity {
         mediaLayer.setTranslationY(0);
         incoming.setTranslationY(0);
         incoming.setVisibility(View.GONE);
-        loadSelection(false);
+        incoming.setImageDrawable(null);
+        loadSelection();
         if (wasAi && oldIndex != queueIndex) toast(oldIndex < queueIndex ? "跳转至下一部作品" : "返回上一部作品");
     }
 
     private void animateSwitch(Selection selection, int direction) {
-        if (dragging) return;
+        if (dragging || switching) return;
+        switching = true;
         int height = Math.max(1, root.getHeight());
-        incoming.setImageDrawable(null);
-        incoming.setVisibility(View.VISIBLE);
-        loadPoster(selection.item, incoming);
+        showIncoming(selection, direction);
         incoming.setTranslationY(direction > 0 ? height : -height);
         player.pause();
         mediaLayer.animate().translationY(direction > 0 ? -height : height).setDuration(290).start();
@@ -813,6 +1089,13 @@ public final class PlayerActivity extends Activity {
     private boolean handleGesture(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                if (switching) return true;
+                mediaLayer.animate().cancel();
+                incoming.animate().cancel();
+                if (edgeGestureStart(event.getY())) {
+                    dragging = false;
+                    return false;
+                }
                 touchStartX = event.getX();
                 touchStartY = event.getY();
                 dragY = 0;
@@ -836,6 +1119,7 @@ public final class PlayerActivity extends Activity {
                     if (gestureMode == GESTURE_HORIZONTAL && player != null && player.getDuration() > 0) {
                         gestureSeekStart = player.getCurrentPosition();
                         seeking = true;
+                        cancelPrefetch();
                         revealControls();
                         handler.removeCallbacks(hideControls);
                     }
@@ -870,13 +1154,10 @@ public final class PlayerActivity extends Activity {
                 Selection candidate = adjacent(direction);
                 mediaLayer.setTranslationY(dragY);
                 if (candidate != null) {
-                    if (incoming.getVisibility() != View.VISIBLE) {
-                        incoming.setImageDrawable(null);
-                        incoming.setVisibility(View.VISIBLE);
-                        loadPoster(candidate.item, incoming);
-                    }
+                    if (incoming.getVisibility() != View.VISIBLE || incomingDirection != direction)
+                        showIncoming(candidate, direction);
                     incoming.setTranslationY((direction > 0 ? root.getHeight() : -root.getHeight()) + dragY);
-                }
+                } else incoming.setVisibility(View.GONE);
                 return true;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
@@ -920,6 +1201,7 @@ public final class PlayerActivity extends Activity {
                 int moveDirection = dragY < 0 ? 1 : -1;
                 Selection next = adjacent(moveDirection);
                 if (!cancelled && Math.abs(dragY) > Math.max(dp(76), root.getHeight() * 0.12f) && next != null) {
+                    switching = true;
                     int height = root.getHeight();
                     player.pause();
                     mediaLayer.animate().translationY(moveDirection > 0 ? -height : height).setDuration(260).start();
@@ -969,7 +1251,7 @@ public final class PlayerActivity extends Activity {
         scroll.addView(grid);
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, dp(260)));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(286), -2, Gravity.BOTTOM | Gravity.RIGHT);
-        params.bottomMargin = dp(88);
+        params.bottomMargin = navigationInsetBottom + dp(88);
         params.rightMargin = dp(13);
         root.addView(panel, params);
         episodePanel = panel;
@@ -1010,6 +1292,8 @@ public final class PlayerActivity extends Activity {
         closeSpeedPanel();
         if (seeking) stopSeekPreview();
         updateControlLayout();
+        root.requestApplyInsets();
+        updateSystemBars();
     }
 
     private void updateMiniProgress(long position, long duration) {
@@ -1169,7 +1453,7 @@ public final class PlayerActivity extends Activity {
     }
 
     private void saveProgress(boolean completed) {
-        if (player == null || currentId == null || player.getDuration() <= 0) return;
+        if (player == null || currentId == null || currentSource == null || player.getDuration() <= 0) return;
         try {
             JSONObject value = new JSONObject();
             value.put("id", currentId);
@@ -1185,6 +1469,13 @@ public final class PlayerActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        foreground = false;
+        cancelPrefetch();
+        switching = false;
+        mediaLayer.animate().cancel();
+        incoming.animate().cancel();
+        mediaLayer.setTranslationY(0);
+        incoming.setVisibility(View.GONE);
         handler.removeCallbacks(longPress);
         handler.removeCallbacks(singleTap);
         dragging = false;
@@ -1197,13 +1488,35 @@ public final class PlayerActivity extends Activity {
         super.onPause();
     }
 
-    @Override public void onBackPressed() {
-        if (speedPanel != null) closeSpeedPanel();
+    @Override protected void onResume() {
+        super.onResume();
+        foreground = true;
+        updateSystemBars();
+        maybePrepareNext();
+    }
+
+    private void handlePlayerBack() {
+        if (fullscreenMode) {
+            if (speedPanel != null) closeSpeedPanel();
+            if (episodesOpen) closeEpisodes();
+            setFullscreenMode(false);
+        } else if (speedPanel != null) closeSpeedPanel();
         else if (episodesOpen) closeEpisodes();
-        else super.onBackPressed();
+        else finish();
+    }
+
+    @Override public void onBackPressed() {
+        handlePlayerBack();
     }
 
     @Override protected void onDestroy() {
+        destroyed = true;
+        ++loadToken;
+        cancelPrefetch();
+        stopSeekPreview();
+        prefetchWorker.shutdownNow();
+        if (Build.VERSION.SDK_INT >= 33 && backCallback != null)
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         handler.removeCallbacksAndMessages(null);
         worker.shutdownNow();
         if (player != null) player.release();
