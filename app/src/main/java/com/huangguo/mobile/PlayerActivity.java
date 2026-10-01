@@ -605,7 +605,7 @@ public final class PlayerActivity extends Activity {
         FrameLayout.LayoutParams miniParams = new FrameLayout.LayoutParams(-1, dp(3), Gravity.BOTTOM);
         miniParams.leftMargin = dp(5);
         miniParams.rightMargin = dp(5);
-        miniParams.bottomMargin = dp(14);
+        miniParams.bottomMargin = dp(7);
         root.addView(miniProgress, miniParams);
         root.setOnApplyWindowInsetsListener((viewRoot, insets) -> {
             int topInset = Build.VERSION.SDK_INT >= 30
@@ -625,8 +625,8 @@ public final class PlayerActivity extends Activity {
                 controls.setLayoutParams(controlsLayout);
             }
             FrameLayout.LayoutParams progressLayout = (FrameLayout.LayoutParams) miniProgress.getLayoutParams();
-            if (progressLayout.bottomMargin != bottomInset + dp(14)) {
-                progressLayout.bottomMargin = bottomInset + dp(14);
+            if (progressLayout.bottomMargin != bottomInset + dp(7)) {
+                progressLayout.bottomMargin = bottomInset + dp(7);
                 miniProgress.setLayoutParams(progressLayout);
             }
             return insets;
