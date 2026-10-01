@@ -8,7 +8,7 @@ window.NativeCallbacks = {
 };
 function api(action, args = {}) {
   return new Promise((resolve, reject) => {
-    const id = String(++requestNumber);
+    const id = (window.HotRuntime?.bootId || 'legacy') + ':' + (++requestNumber);
     callbacks.set(id, { resolve, reject });
     try { AndroidHost.request(id, action, JSON.stringify(args)); }
     catch (error) { callbacks.delete(id); reject(error); }
@@ -116,6 +116,10 @@ function setAccount(profile) {
   if (state.route === 'account-management') renderAccountManagement();
 }
 api('account').then(setAccount).catch(() => {});
+window.hgWindowInsets = height => {
+  document.getElementById('app').style.setProperty('--status-bar-height', `${Math.max(0, Number(height) || 0)}px`);
+};
+api('window-insets').then(window.hgWindowInsets).catch(() => {});
 api('screen-corners').then(corners => {
   const app = document.getElementById('app');
   for (const name of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft']) {
@@ -436,7 +440,7 @@ document.addEventListener('visibilitychange', () => {
   else scheduleBannerAuto();
 });
 function heroSlide(item, index, count) {
-  return `<div class="hero-slide" data-index="${index}"><img class="hero-image" data-cover="${esc(item.cover || '')}" alt=""><div class="hero-shade"></div>
+  return `<div class="hero-slide" data-index="${index}"><img class="hero-image" data-cover="${esc(item.cover || '')}" alt=""><button class="hero-cover-button" type="button" data-open-id="${esc(item.id || '')}" aria-label="查看${esc(item.title || '作品')}详情"></button><div class="hero-shade"></div>
     <div class="hero-copy"><span class="hero-label">本周焦点 <i></i> 独家精选</span><h2>${esc(item.title || '为你推荐')}</h2><p>${esc(item.description || item.episodeLabel || '')}</p><button class="hero-action" data-open-id="${esc(item.id || '')}" type="button">${icon('play')} 立即观看</button></div>
     <div class="hero-index"><b>${String(index + 1).padStart(2, '0')}</b> / ${String(count).padStart(2, '0')}</div></div>`;
 }
@@ -624,8 +628,10 @@ function renderSettings() {
     <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
       <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
       <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
+    <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" data-open-update aria-label="${updateAvailable ? `当前版本 ${esc(appVersion)}，发现新版 ${esc(updateAvailable.version)}，查看更新` : `当前版本 ${esc(appVersion)}，检查更新`}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section></div>`;
+  api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
 }
 
 function renderAccountManagement() {
@@ -706,6 +712,7 @@ function renderDetail() {
   const data = state.detail;
   if (!data) { renderSkeleton(); return; }
   const loading = state.detailLoading;
+  window.AndroidHost?.setDetailMode?.(true);
   const episodes = asArray(data.episodes);
   content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
     <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><p class="detail-description">${esc(data.description || '')}</p>
@@ -718,6 +725,7 @@ function renderSkeleton() {
   content.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
 }
 function renderError(error, retry) {
+  if (state.route === 'detail') window.AndroidHost?.setDetailMode?.(false);
   if (/站点连接失败|站点请求失败|failed to connect|unable to resolve host|unknownhost|connectexception|sockettimeoutexception|timed? out|network is unreachable|connection reset|connection refused|网络|连接失败|无法连接/i.test(error?.message || '')) {
     content.innerHTML = `<div class="error-state error-state--network" role="alert">
       <div class="error-main">
@@ -783,7 +791,10 @@ function setRoute(route) {
   const libraryArea = ['library', 'settings', 'account-management'].includes(route);
   if (state.route === 'library' && route !== 'library') searchInput.value = '';
   state.route = route;
+  document.getElementById('app').dataset.route = route;
+  window.hgThemeRefresh?.();
   document.getElementById('app').classList.toggle('route-detail', route === 'detail');
+  window.AndroidHost?.setDetailMode?.(route === 'detail');
   headerSettings.hidden = route !== 'library';
   searchInput.placeholder = libraryArea ? '搜索观看历史和收藏' : '搜索剧名或 #标签';
   searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
@@ -1161,7 +1172,7 @@ async function goDetail(id, trigger) {
     return;
   }
   const token = ++routeToken;
-  const entrySource = !bannerChanging ? HGCardTransition.capture(trigger) : null;
+  const entrySource = bannerChanging && trigger?.closest('.hero') ? null : HGCardTransition.capture(trigger);
   rememberScreen();
   state.previous = {
     route: state.route, tab: state.tab, sub: state.sub[state.tab], query: state.query,
@@ -1241,6 +1252,7 @@ window.hgBack = () => {
   return false;
 };
 window.hgResume = () => {
+  window.hgThemeRefresh?.();
   retryFailedImages(true);
   if (state.route === 'library') goLibrary(state.libraryTab);
   if (state.route === 'detail' && state.detail) api('bookmark-state', { id: state.detail.id }).then(value => { state.bookmarked = value; renderDetail(); });
@@ -1361,6 +1373,18 @@ function tapDock(button) {
 document.addEventListener('click', async event => {
   if (event.target.closest('[data-open-update]')) { if (updateAvailable) showUpdate(updateAvailable); else checkUpdate(true); return; }
   if (event.target.closest('[data-check-update]')) { checkUpdate(true); return; }
+  if (event.target.closest('[data-check-resources]')) {
+    const button = event.target.closest('[data-check-resources]');
+    button.disabled = true;
+    try {
+      const result = await api('check-hot-update');
+      window.hgHotUpdateStatus(result);
+      toast(result.pending ? '资源更新已下载，下次打开应用时生效' : '已是最新资源');
+    } catch (error) { toast(error.message, true); }
+    finally { if (button.isConnected) button.disabled = false; }
+    return;
+  }
+  if (event.target.closest('[data-apply-resources]')) { api('apply-hot-update').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
   if (event.target.closest('[data-choose-avatar]')) { api('choose-avatar').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-action]')) {
@@ -1414,7 +1438,10 @@ document.addEventListener('click', async event => {
   const sub = event.target.closest('[data-sub]');
   if (sub) { goCategory(state.tab, Number(sub.dataset.sub), !!sub.closest('#compact-category')); return; }
   const card = event.target.closest('[data-open-id]');
-  if (card?.dataset.openId) { goDetail(card.dataset.openId, card); return; }
+  if (card?.dataset.openId) {
+    if (card.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
+    goDetail(card.dataset.openId, card); return;
+  }
   const filter = event.target.closest('[data-filter]');
   if (filter) { state.filter = filter.dataset.filter; renderSearch(); return; }
   const slide = event.target.closest('[data-slide]');
@@ -1461,17 +1488,37 @@ document.addEventListener('click', async event => {
   }
 });
 
-let heroStartX;
-content.addEventListener('touchstart', event => { if (event.target.closest('.hero')) heroStartX = event.touches[0].clientX; }, { passive: true });
+let heroTouch;
+let heroSuppressClickUntil = 0;
+content.addEventListener('touchstart', event => {
+  if (!event.target.closest('.hero') || event.touches.length !== 1) return;
+  stopBannerAuto();
+  const touch = event.touches[0];
+  heroTouch = { x: touch.clientX, y: touch.clientY, moved: false };
+}, { passive: true });
+content.addEventListener('touchmove', event => {
+  if (!heroTouch || !event.touches.length) return;
+  const touch = event.touches[0];
+  heroTouch.moved ||= Math.abs(touch.clientX - heroTouch.x) > 10 || Math.abs(touch.clientY - heroTouch.y) > 10;
+}, { passive: true });
 content.addEventListener('touchend', event => {
-  if (heroStartX == null || !event.target.closest('.hero')) return;
-  const move = event.changedTouches[0].clientX - heroStartX;
-  heroStartX = null;
-  if (Math.abs(move) < 55 || !state.home) return;
+  if (!heroTouch) return;
+  const touch = event.changedTouches[0];
+  const move = touch.clientX - heroTouch.x;
+  const vertical = touch.clientY - heroTouch.y;
+  if (heroTouch.moved || Math.abs(move) > 10 || Math.abs(vertical) > 10) heroSuppressClickUntil = performance.now() + 400;
+  heroTouch = null;
+  scheduleBannerAuto();
+  if (Math.abs(move) < 55 || Math.abs(move) <= Math.abs(vertical) || !state.home) return;
   const count = homeSlides().length;
   if (!count) return;
   const direction = move < 0 ? 1 : -1;
   changeBanner((state.banner + direction + count) % count, direction);
+}, { passive: true });
+content.addEventListener('touchcancel', () => {
+  if (!heroTouch) return;
+  heroTouch = null; heroSuppressClickUntil = performance.now() + 400;
+  scheduleBannerAuto();
 }, { passive: true });
 
 api('app-version').then(version => {
@@ -1482,7 +1529,23 @@ api('app-version').then(version => {
 }).catch(() => {});
 api('cached-update').then(result => { if (result.status === 'available') setAvailableUpdate(result); }).catch(() => {});
 function startHome() { goHome(); setTimeout(() => checkUpdate(false), 3000); }
-document.getElementById('age-confirm').addEventListener('click', () => { localStorage.setItem('adult-confirmed', '1'); document.getElementById('age-gate').hidden = true; startHome(); });
+document.getElementById('age-confirm').addEventListener('click', () => { localStorage.setItem('adult-confirmed', '1'); api('confirm-age').catch(() => {}); document.getElementById('age-gate').hidden = true; startHome(); });
 document.getElementById('age-exit').addEventListener('click', () => api('quit'));
-if (localStorage.getItem('adult-confirmed') === '1') startHome();
-else document.getElementById('age-gate').hidden = false;
+api('age-status').then(confirmed => {
+  if (confirmed || localStorage.getItem('adult-confirmed') === '1') {
+    document.getElementById('age-gate').hidden = true;
+    startHome();
+  } else document.getElementById('age-gate').hidden = false;
+}).catch(() => { if (localStorage.getItem('adult-confirmed') === '1') startHome(); else document.getElementById('age-gate').hidden = false; });
+
+window.hgCanApplyHotUpdate = () => ['home', 'settings'].includes(state.route)
+  && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden
+  && document.getElementById('age-gate').hidden
+  && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+window.hgHotUpdateStatus = result => {
+  const label = content.querySelector('[data-resource-status]');
+  if (label) label.textContent = result.pending ? '资源已下载，下次打开时生效。' : '当前资源：' + (result.version || '内置') + '，后台自动更新。';
+  const apply = content.querySelector('[data-apply-resources]');
+  if (apply) apply.hidden = !result.pending;
+};
+window.hgBootReady?.();

@@ -142,6 +142,7 @@
       this.stage = stage; this.surface = surface; this.body = body;
       this.photo = photo; this.image = image; this.label = label;
       this.app.classList.add('card-transition-active');
+      this.lastShape = null;
       this.current = opening ? { ...this.small } : { ...this.full };
       this.draw(this.current);
     }
@@ -157,6 +158,10 @@
       this.surface.style.borderRadius = `${corners.map(corner => `${corner / sx}px`).join(' ')} / ${corners.map(corner => `${corner / sy}px`).join(' ')}`;
       // Counter-scale the page so text and controls never stretch with the card bounds.
       this.body.style.transform = `scale(${geometry.contentScale / sx},${geometry.contentScale / sy})`;
+      // During a drag the entire page moves/scales, while its internal layout stays
+      // unchanged. Avoid redoing image crops, title colors and opacity on every tick.
+      if (p === this.lastShape) return;
+      this.lastShape = p;
       this.extras.style.opacity = String((1 - p) * (1 - p));
       if (this.copy) this.copy.style.opacity = String(p * p);
       if (this.back) this.back.style.opacity = String(p * p);
@@ -257,9 +262,10 @@
           event.target.closest('button,input,.detail-description,#auth-overlay,#confirm-overlay,#update-overlay') || !this.isDetail()) return;
       const point = event.touches[0];
       const bounds = this.app.getBoundingClientRect();
+      const statusInset = parseFloat(getComputedStyle(this.app).getPropertyValue('--status-bar-height')) || 0;
       // Leave the system's status/navigation gestures and side back gestures to Android.
       if (point.clientX < 24 || point.clientX > bounds.right - 24 ||
-          point.clientY < bounds.top + 24 || point.clientY > bounds.bottom - 24) return;
+          point.clientY < bounds.top + statusInset + 24 || point.clientY > bounds.bottom - 24) return;
       this.touch = { x: point.clientX, y: point.clientY, lastY: point.clientY, at: event.timeStamp, velocity: 0, dragging: false };
     }
 

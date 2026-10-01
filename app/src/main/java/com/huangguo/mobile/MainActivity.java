@@ -12,6 +12,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.view.RoundedCorner;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
@@ -27,6 +28,13 @@ import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import androidx.core.content.FileProvider;
+import androidx.webkit.WebViewAssetLoader;
+import android.os.Handler;
+import android.os.Looper;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebResourceError;
+import android.webkit.RenderProcessGoneDetail;
+import org.json.JSONTokener;
 
 import org.json.JSONObject;
 import java.io.File;
@@ -44,6 +52,12 @@ public final class MainActivity extends Activity {
     private AppStore store;
     private AccountService account;
     private UpdateManager updates;
+    private HotUpdateManager hotUpdates;
+    private HotUpdateManager.Session hotSession;
+    private boolean migratingOrigin;
+    private boolean resourceReady;
+    private final Handler hotHandler = new Handler(Looper.getMainLooper());
+    private final Runnable resourceTimeout = () -> recoverResources();
     private File pendingUpdateApk;
     private OnBackInvokedCallback backCallback;
     private boolean backRegistered;
@@ -53,11 +67,20 @@ public final class MainActivity extends Activity {
     private int backViewLeft;
     private int backViewWidth;
     private float backLeadPx;
+    private volatile float statusBarInsetDp;
+    private boolean detailSystemBars;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        repository = new SiteRepository(this);
+        hotUpdates = HotUpdateManager.get(this);
+        hotSession = hotUpdates.beginSession();
+        repository = new SiteRepository(this, hotSession.site);
         store = new AppStore(this);
+        android.content.SharedPreferences hotPrefs = getSharedPreferences("hot-updates", MODE_PRIVATE);
+        String previousRules = hotPrefs.getString("siteFingerprint", "");
+        if (!previousRules.isEmpty() && !previousRules.equals(hotSession.site.fingerprint)) store.clearCache();
+        hotPrefs.edit().putString("siteFingerprint", hotSession.site.fingerprint).apply();
+        migratingOrigin = !hotPrefs.getBoolean("originMigrated", false);
         account = new AccountService(this, store);
         try {
             ParseUser current = ParseUser.getCurrentUser();
@@ -72,27 +95,77 @@ public final class MainActivity extends Activity {
         webView.setBackgroundColor(Color.TRANSPARENT);
         root.addView(webView, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
+        UiRefreshRate.apply(this, webView);
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams attributes = getWindow().getAttributes();
+            attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(attributes);
+        }
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars());
-                root.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+                statusBarInsetDp = safe.top / getResources().getDisplayMetrics().density;
+                root.setPadding(safe.left, 0, safe.right, safe.bottom);
             } else {
-                root.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                statusBarInsetDp = insets.getSystemWindowInsetTop() / getResources().getDisplayMetrics().density;
+                root.setPadding(insets.getSystemWindowInsetLeft(), 0,
                         insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             }
+            publishWindowInsets();
             return insets;
         });
         applyTheme();
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
-        webView.getSettings().setAllowFileAccess(true);
+        webView.getSettings().setAllowFileAccess(migratingOrigin);
         webView.getSettings().setAllowFileAccessFromFileURLs(false);
         webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         webView.getSettings().setMediaPlaybackRequiresUserGesture(true);
+        WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", path -> hotUpdates.resource(hotSession, path)).build();
         webView.setWebViewClient(new WebViewClient() {
+            @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return loader.shouldInterceptRequest(request.getUrl());
+            }
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                if (HotUpdateManager.trusted(Uri.parse(url))) {
+                    resourceReady = false;
+                    hotHandler.removeCallbacks(resourceTimeout);
+                    if (hotSession.trial) hotHandler.postDelayed(resourceTimeout, 15_000);
+                }
+            }
+            @Override public void onPageFinished(WebView view, String url) {
+                if (migratingOrigin && "file:///android_asset/app.html".equals(url)) {
+                    view.evaluateJavascript("localStorage.getItem('adult-confirmed')", value -> {
+                        if (isDestroyed()) return;
+                        try {
+                            Object confirmed = new JSONTokener(value).nextValue();
+                            getSharedPreferences("hot-updates", MODE_PRIVATE).edit().putBoolean("originMigrated", true)
+                                    .putBoolean("adultConfirmed", "1".equals(confirmed)).apply();
+                        } catch (Exception ignored) { }
+                        migratingOrigin = false;
+                        view.getSettings().setAllowFileAccess(false);
+                        view.loadUrl(HotUpdateManager.UI_URL);
+                    });
+                    return;
+                }
+                publishWindowInsets();
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return !"file".equals(request.getUrl().getScheme());
+                return !HotUpdateManager.trusted(request.getUrl());
+            }
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame() && hotSession.trial) recoverResources();
+            }
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (request.isForMainFrame() && hotSession.trial && response.getStatusCode() >= 400) recoverResources();
+            }
+            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                try { hotUpdates.rollback(hotSession); } catch (Exception error) { Log.w(TAG, "资源回退失败", error); }
+                root.removeView(view); view.destroy(); webView = null;
+                recreate();
+                return true;
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -111,7 +184,42 @@ public final class MainActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(new Bridge(), "AndroidHost");
-        webView.loadUrl("file:///android_asset/app.html");
+        webView.loadUrl(migratingOrigin ? "file:///android_asset/app.html" : HotUpdateManager.UI_URL);
+        checkHotUpdates();
+    }
+
+    private void checkHotUpdates() {
+        requests.execute(() -> {
+            try {
+                JSONObject status = hotUpdates.check(false);
+                runOnUiThread(() -> {
+                    if (!isDestroyed() && webView != null) webView.evaluateJavascript(
+                            "window.hgHotUpdateStatus && window.hgHotUpdateStatus(" + status + ")", null);
+                });
+            } catch (Exception error) { Log.d(TAG, "资源更新暂不可用，继续使用本地版本", error); }
+        });
+    }
+
+    private void recoverResources() {
+        if (resourceReady || hotSession == null || !hotSession.trial || isDestroyed()) return;
+        hotHandler.removeCallbacks(resourceTimeout);
+        try {
+            hotUpdates.rollback(hotSession);
+            hotSession = hotUpdates.beginSession();
+            repository = new SiteRepository(this, hotSession.site);
+            store.clearCache();
+            getSharedPreferences("hot-updates", MODE_PRIVATE).edit()
+                    .putString("siteFingerprint", hotSession.site.fingerprint).apply();
+            webView.loadUrl(HotUpdateManager.UI_URL);
+            Log.w(TAG, "资源包启动异常，已回退至可用版本");
+        } catch (Exception error) { Log.e(TAG, "资源回退失败", error); }
+    }
+
+    private void applyPendingResources() {
+        if (!hotUpdates.hasPending() || webView == null || isDestroyed()) return;
+        webView.evaluateJavascript("window.hgCanApplyHotUpdate ? window.hgCanApplyHotUpdate() : false", safe -> {
+            if ("true".equals(safe) && !isDestroyed()) recreate();
+        });
     }
 
     private boolean dark() {
@@ -139,11 +247,23 @@ public final class MainActivity extends Activity {
         boolean dark = dark();
         int background = Color.parseColor(dark ? "#171B1D" : "#F5F2E9");
         root.setBackgroundColor(background);
-        getWindow().setStatusBarColor(background);
-        getWindow().setNavigationBarColor(background);
-        int flags = dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-        getWindow().getDecorView().setSystemUiVisibility(flags);
+        applySystemBars();
         if (webView != null) webView.evaluateJavascript("window.hgTheme && window.hgTheme(" + dark + ")", null);
+    }
+
+    private void publishWindowInsets() {
+        if (webView != null) webView.evaluateJavascript("window.hgWindowInsets && window.hgWindowInsets(" + statusBarInsetDp + ")", null);
+    }
+
+    private void applySystemBars() {
+        boolean dark = dark();
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.parseColor(dark ? "#171B1D" : "#F5F2E9"));
+        if (Build.VERSION.SDK_INT >= 29) getWindow().setStatusBarContrastEnforced(false);
+        int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+        if (!dark) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        if (!dark && !detailSystemBars) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
     @Override public void onConfigurationChanged(Configuration configuration) {
@@ -153,7 +273,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        applySystemBars();
+        if (webView != null) UiRefreshRate.apply(this, webView);
         if (webView != null) webView.evaluateJavascript("window.hgResume && window.hgResume()", null);
+        if (hotUpdates != null && !migratingOrigin) {
+            applyPendingResources();
+            checkHotUpdates();
+        }
         if (account != null && ParseUser.getCurrentUser() != null) requests.execute(() -> {
             try {
                 account.sync();
@@ -166,6 +292,11 @@ public final class MainActivity extends Activity {
             if (getPackageManager().canRequestPackageInstalls()) openUpdateInstaller(apk);
             else webView.evaluateJavascript("window.hgUpdateInstallPermissionDenied && window.hgUpdateInstallPermissionDenied()", null);
         }
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && webView != null) UiRefreshRate.apply(this, webView);
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -303,6 +434,7 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33 && backRegistered) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         }
+        hotHandler.removeCallbacksAndMessages(null);
         requests.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("AndroidHost");
@@ -313,8 +445,22 @@ public final class MainActivity extends Activity {
 
     private Object dispatch(String action, JSONObject args) throws Exception {
         switch (action) {
+            case "hot-update-status": return hotUpdates.status();
+            case "check-hot-update": return hotUpdates.check(true);
+            case "apply-hot-update": runOnUiThread(this::applyPendingResources); return true;
+            case "age-status": return getSharedPreferences("hot-updates", MODE_PRIVATE).getBoolean("adultConfirmed", false);
+            case "confirm-age": getSharedPreferences("hot-updates", MODE_PRIVATE).edit().putBoolean("adultConfirmed", true).apply(); return true;
+            case "hot-ready": {
+                if (!migratingOrigin && args.optLong("revision", -1) == hotSession.revision
+                        && hotSession.bootId.equals(args.optString("bootId"))) {
+                    hotUpdates.markHealthy(hotSession);
+                    runOnUiThread(() -> { resourceReady = true; hotHandler.removeCallbacks(resourceTimeout); });
+                }
+                return true;
+            }
             case "theme": return dark();
             case "screen-corners": return screenCorners();
+            case "window-insets": return statusBarInsetDp;
             case "account": return account.profile();
             case "register": return account.register(args.optString("username"), args.optString("password"));
             case "login": return account.login(args.optString("username"), args.optString("password"));
@@ -411,6 +557,13 @@ public final class MainActivity extends Activity {
     }
 
     private final class Bridge {
+        @JavascriptInterface public void setDetailMode(boolean enabled) {
+            runOnUiThread(() -> {
+                if (detailSystemBars == enabled) return;
+                detailSystemBars = enabled;
+                applySystemBars();
+            });
+        }
         @JavascriptInterface public void setBackEnabled(boolean enabled) {
             runOnUiThread(() -> updateBackRegistration(enabled));
         }
@@ -429,13 +582,14 @@ public final class MainActivity extends Activity {
                     String authUserId = ("login".equals(action) || "register".equals(action)) && result instanceof JSONObject
                             ? ((JSONObject) result).optString("userId") : "";
                     runOnUiThread(() -> {
+                        if (isDestroyed() || webView == null) return;
                         webView.evaluateJavascript(script, null);
                         if (!authUserId.isEmpty()) refreshAccountAfterAuth(authUserId);
                     });
                 } catch (Exception error) {
                     Log.e(TAG, action + " failed", error);
                     String script = "window.NativeCallbacks.reject(" + JSONObject.quote(requestId) + "," + JSONObject.quote(error.getMessage() == null ? "请求失败" : error.getMessage()) + ")";
-                    runOnUiThread(() -> webView.evaluateJavascript(script, null));
+                    runOnUiThread(() -> { if (!isDestroyed() && webView != null) webView.evaluateJavascript(script, null); });
                 }
             });
         }
