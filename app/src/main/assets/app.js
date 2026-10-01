@@ -417,9 +417,40 @@ function hydrateImages(root = content) {
   });
 }
 
+function activeCampaigns() {
+  const now = Date.now();
+  return asArray(window.HotRuntime?.theme?.campaigns).filter(item => item?.id
+    && (!item.startsAt || now >= Date.parse(item.startsAt))
+    && (!item.endsAt || now < Date.parse(item.endsAt))
+    && /^theme\/[a-zA-Z0-9_./-]+$/.test(item.artwork || '') && !item.artwork.split('/').includes('..'));
+}
+function campaignArtwork(item) {
+  return new URL(item.artwork, 'https://appassets.androidplatform.net/assets/').href;
+}
 function homeSlides() {
   const featured = asArray(state.home?.featured);
-  return featured.length ? featured : asArray(state.home?.recommend?.items).slice(0, 5);
+  const videos = featured.length ? featured : asArray(state.home?.recommend?.items).slice(0, 5);
+  return [...activeCampaigns().map(item => ({ ...item, kind: 'campaign', cover: '' })), ...videos];
+}
+function campaignSlide(item, index, count) {
+  return '<div class="hero-slide hero-campaign" data-index="' + index + '">'
+    + '<img class="hero-image campaign-image" src="' + esc(campaignArtwork(item)) + '" alt="">'
+    + '<button class="hero-cover-button" type="button" data-open-campaign="' + esc(item.id) + '" aria-label="查看国庆庆祝页"></button>'
+    + '<div class="hero-copy"><h2>' + esc(item.title) + '</h2><p>' + esc(item.description || '').replaceAll('\n', '<br>') + '</p>'
+    + '<button class="hero-action" type="button" data-open-campaign="' + esc(item.id) + '">' + esc(item.button || '查看庆祝页') + '</button></div>'
+    + '<span class="campaign-date">' + esc(item.dateLabel || '') + '</span>'
+    + '<div class="hero-index"><b>' + String(index + 1).padStart(2, '0') + '</b> / ' + String(count).padStart(2, '0') + '</div></div>';
+}
+function goCampaign(item) {
+  state.campaignReturn = captureScreen();
+  ++routeToken;
+  setRoute('campaign');
+  state.campaign = item;
+  content.innerHTML = '<article class="campaign-page"><button class="campaign-back" type="button" data-back>' + icon('back') + ' 返回首页</button>'
+    + '<section class="campaign-poster"><img src="' + esc(campaignArtwork(item)) + '" alt="">'
+    + '<div><h1>' + esc(item.title) + '</h1><p>' + esc(item.description || '').replaceAll('\n', '<br>') + '</p><span>' + esc(item.dateLabel || '') + '</span></div></section>'
+    + '<section class="campaign-message"><h2>共庆好时光</h2><p>' + esc(item.message || '') + '</p><button type="button" data-back>返回首页</button></section></article>';
+  scroll.scrollTop = 0;
 }
 function stopBannerAuto() {
   clearTimeout(bannerTimer);
@@ -440,6 +471,7 @@ document.addEventListener('visibilitychange', () => {
   else scheduleBannerAuto();
 });
 function heroSlide(item, index, count) {
+  if (item.kind === 'campaign') return campaignSlide(item, index, count);
   return `<div class="hero-slide" data-index="${index}"><img class="hero-image" data-cover="${esc(item.cover || '')}" alt=""><button class="hero-cover-button" type="button" data-open-id="${esc(item.id || '')}" aria-label="查看${esc(item.title || '作品')}详情"></button><div class="hero-shade"></div>
     <div class="hero-copy"><span class="hero-label">本周焦点 <i></i> 独家精选</span><h2>${esc(item.title || '为你推荐')}</h2><p>${esc(item.description || item.episodeLabel || '')}</p><button class="hero-action" data-open-id="${esc(item.id || '')}" type="button">${icon('play')} 立即观看</button></div>
     <div class="hero-index"><b>${String(index + 1).padStart(2, '0')}</b> / ${String(count).padStart(2, '0')}</div></div>`;
@@ -453,7 +485,7 @@ async function changeBanner(targetIndex, direction, automatic = false) {
   let incoming = null;
   try {
     const item = slides[targetIndex];
-    const data = await getCover(item.cover);
+    const data = item.kind === 'campaign' ? campaignArtwork(item) : await getCover(item.cover);
     const template = document.createElement('template');
     template.innerHTML = heroSlide(item, targetIndex, slides.length);
     incoming = template.content.firstElementChild;
@@ -464,7 +496,7 @@ async function changeBanner(targetIndex, direction, automatic = false) {
     hero.appendChild(incoming);
     await image.decode();
     if (!hero.isConnected || state.route !== 'home' || document.hidden) { incoming.remove(); return; }
-    applyBannerPalette(image);
+    if (item.kind !== 'campaign') applyBannerPalette(image);
     const current = hero.querySelector('.hero-slide:not(:last-child)');
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     incoming.classList.add('animating');
@@ -803,6 +835,7 @@ function setRoute(route) {
 }
 
 function backDestination() {
+  if (state.route === 'campaign') return state.campaignReturn?.route || 'home';
   if (state.route === 'detail') return state.previous?.route || 'home';
   if (state.route === 'account-management') return state.accountReturn?.route || 'settings';
   if (state.route === 'settings') return state.settingsReturn?.route || 'library';
@@ -1241,6 +1274,7 @@ window.hgBack = () => {
   if (!authOverlay.hidden) { hideAuth(); return true; }
   if (!confirmOverlay.hidden) { closeConfirmation(false); return true; }
   if (!updateOverlay.hidden) { if (!updateDownloading) updateOverlay.hidden = true; return true; }
+  if (state.route === 'campaign') { restoreScreen(state.campaignReturn); return true; }
   if (state.route === 'account-management') { restoreScreen(state.accountReturn); return true; }
   if (state.route === 'settings') { restoreScreen(state.settingsReturn); return true; }
   if (state.route === 'detail') { if (detailCard) detailCard.close(); else returnFromDetail(); return true; }
@@ -1371,6 +1405,13 @@ function tapDock(button) {
 }
 
 document.addEventListener('click', async event => {
+  const campaignButton = event.target.closest('[data-open-campaign]');
+  if (campaignButton) {
+    if (campaignButton.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
+    const item = activeCampaigns().find(item => item.id === campaignButton.dataset.openCampaign);
+    if (item) goCampaign(item);
+    return;
+  }
   if (event.target.closest('[data-open-update]')) { if (updateAvailable) showUpdate(updateAvailable); else checkUpdate(true); return; }
   if (event.target.closest('[data-check-update]')) { checkUpdate(true); return; }
   if (event.target.closest('[data-check-resources]')) {
